@@ -2,11 +2,12 @@
 MLX backend implementation for TTS and STT using mlx-audio.
 """
 
-from typing import Optional, List, Tuple
 import asyncio
 import logging
-import numpy as np
 from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,81 @@ ensure_original_qwen_config_cached()
 
 from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
 from .base import is_model_cached, combine_voice_prompts as _combine_voice_prompts, model_load_progress
+from .mlx_runtime import (
+    MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION as _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION,
+    get_installed_mlx_audio_version,
+)
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
+
+_MLX_AUDIO_QWEN_MODEL_TYPE = "qwen3_tts"
+_MLX_AUDIO_QWEN_DTYPE_BACKPORT_MARKER = "_voicebox_mlx_audio_qwen_dtype_backport"
+
+
+def _apply_mlx_audio_qwen_dtype_backport(model: object, mlx_audio_version: str | None) -> bool:
+    """Backport the Qwen speaker-embedding dtype fix to mlx-audio 0.4.1.
+
+    In mlx-audio 0.4.1 the speaker encoder returns float32 even when the
+    talker is BF16. Concatenating those arrays promotes the talker prefill and
+    KV cache to float32. Upstream fixed both cloning paths in PR #879 by
+    casting the speaker embedding to the talker embedding dtype:
+    https://github.com/Blaizzy/mlx-audio/pull/879
+
+    The wrapper is intentionally restricted to the one affected dependency
+    version and the expected Qwen model interface. Newer mlx-audio versions
+    contain the upstream fix and must not be monkey-patched here.
+    """
+    if mlx_audio_version != _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION:
+        return False
+
+    if getattr(model, _MLX_AUDIO_QWEN_DTYPE_BACKPORT_MARKER, False):
+        return True
+
+    if getattr(model, "model_type", None) != _MLX_AUDIO_QWEN_MODEL_TYPE:
+        logger.warning(
+            "Skipping mlx-audio %s Qwen dtype backport: unexpected model type %r",
+            mlx_audio_version,
+            getattr(model, "model_type", None),
+        )
+        return False
+
+    extract_speaker_embedding = getattr(model, "extract_speaker_embedding", None)
+    talker = getattr(model, "talker", None)
+    get_input_embeddings = getattr(talker, "get_input_embeddings", None)
+    if not callable(extract_speaker_embedding) or not callable(get_input_embeddings):
+        logger.warning(
+            "Skipping mlx-audio %s Qwen dtype backport: unexpected model interface",
+            mlx_audio_version,
+        )
+        return False
+
+    codec_embedding = get_input_embeddings()
+    target_dtype = getattr(getattr(codec_embedding, "weight", None), "dtype", None)
+    if target_dtype is None:
+        logger.warning(
+            "Skipping mlx-audio %s Qwen dtype backport: codec embedding dtype is unavailable",
+            mlx_audio_version,
+        )
+        return False
+    if not str(target_dtype).endswith("bfloat16"):
+        logger.warning(
+            "Skipping mlx-audio %s Qwen dtype backport: expected a BF16 talker, got %s",
+            mlx_audio_version,
+            target_dtype,
+        )
+        return False
+
+    def extract_speaker_embedding_with_talker_dtype(audio, sr=24000):
+        speaker_embedding = extract_speaker_embedding(audio, sr=sr)
+        return speaker_embedding.astype(target_dtype)
+
+    model.extract_speaker_embedding = extract_speaker_embedding_with_talker_dtype
+    setattr(model, _MLX_AUDIO_QWEN_DTYPE_BACKPORT_MARKER, True)
+    logger.info(
+        "Applied mlx-audio %s Qwen speaker-embedding dtype backport (%s)",
+        mlx_audio_version,
+        target_dtype,
+    )
+    return True
 
 
 class MLXTTSBackend:
@@ -96,9 +171,23 @@ class MLXTTSBackend:
         with model_load_progress(model_name, is_cached):
             from mlx_audio.tts import load
 
+            mlx_audio_version = get_installed_mlx_audio_version()
+
             logger.info("Loading MLX TTS model %s...", model_size)
 
-            self.model = load(model_path)
+            loaded_model = load(model_path)
+            backport_applied = _apply_mlx_audio_qwen_dtype_backport(loaded_model, mlx_audio_version)
+            is_qwen_model = (
+                getattr(loaded_model, "model_type", None) == _MLX_AUDIO_QWEN_MODEL_TYPE
+                or "qwen" in model_path.casefold()
+            )
+            if mlx_audio_version == _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION and is_qwen_model and not backport_applied:
+                raise RuntimeError(
+                    "mlx-audio 0.4.1 Qwen model does not support Voicebox's required "
+                    "speaker-embedding dtype guard; refusing to load an unverified TTS "
+                    "implementation"
+                )
+            self.model = loaded_model
 
         self._current_model_size = model_size
         self.model_size = model_size
@@ -211,10 +300,10 @@ class MLXTTSBackend:
 
             # Validate that the audio file exists
             if ref_audio and not Path(ref_audio).exists():
-                logger.warning("Audio file not found: %s", ref_audio)
-                logger.warning("This may be due to a cached voice prompt referencing a deleted temp file.")
-                logger.warning("Regenerating without voice prompt.")
-                ref_audio = None
+                raise FileNotFoundError(
+                    "Voice-cloning reference audio is missing; refusing to generate with a "
+                    f"different voice: {ref_audio}"
+                )
 
             # Inference runs with the process's default HF_HUB_OFFLINE
             # state. Forcing offline here (previously used to avoid lazy
@@ -233,21 +322,18 @@ class MLXTTSBackend:
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
                     else:
-                        # Fallback: generate without voice cloning
-                        for result in self.model.generate(text, lang_code=lang):
-                            audio_chunks.append(np.array(result.audio))
-                            sample_rate = result.sample_rate
+                        raise RuntimeError(
+                            "Loaded MLX model does not support ref_audio; refusing to generate with a generic voice"
+                        )
                 else:
                     # No voice prompt, generate normally
                     for result in self.model.generate(text, lang_code=lang):
                         audio_chunks.append(np.array(result.audio))
                         sample_rate = result.sample_rate
             except Exception as e:
-                # If voice cloning fails, try without it
-                logger.warning("Voice cloning failed, generating without voice prompt: %s", e)
-                for result in self.model.generate(text, lang_code=lang):
-                    audio_chunks.append(np.array(result.audio))
-                    sample_rate = result.sample_rate
+                if ref_audio:
+                    raise RuntimeError("Voice cloning failed; refusing to generate with a generic voice") from e
+                raise
 
             # Concatenate all chunks
             if audio_chunks:

@@ -53,12 +53,37 @@ def _resolve_generation_engine(data: models.GenerationRequest, profile) -> str:
     return data.engine or getattr(profile, "default_engine", None) or getattr(profile, "preset_engine", None) or "qwen"
 
 
+def _require_tts_implementation_revision(data: models.GenerationRequest, *, required: bool = False) -> None:
+    """Reject a request whose frozen TTS implementation is not this server."""
+    expected = data.tts_implementation_revision
+    if expected is None:
+        if required:
+            raise HTTPException(
+                status_code=422,
+                detail="tts_implementation_revision is required for exact generation",
+            )
+        return
+
+    from ..backends import get_tts_implementation_revision
+
+    actual = get_tts_implementation_revision()
+    if actual != expected:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"TTS implementation revision mismatch: requested {expected!r}, "
+                f"running {actual!r}; restart the matching Voicebox backend"
+            ),
+        )
+
+
 @router.post("/generate", response_model=models.GenerationResponse)
 async def generate_speech(
     data: models.GenerationRequest,
     db: Session = Depends(get_db),
 ):
     """Generate speech from text using a voice profile."""
+    _require_tts_implementation_revision(data)
     task_manager = get_task_manager()
     generation_id = str(uuid.uuid4())
 
@@ -143,6 +168,16 @@ async def generate_speech(
     )
 
     return generation
+
+
+@router.post("/generate/exact", response_model=models.GenerationResponse)
+async def generate_speech_exact(
+    data: models.GenerationRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate only when this server proves the caller's frozen TTS revision."""
+    _require_tts_implementation_revision(data, required=True)
+    return await generate_speech(data, db)
 
 
 @router.post("/generate/{generation_id}/retry", response_model=models.GenerationResponse)
@@ -321,6 +356,7 @@ async def stream_speech(
     db: Session = Depends(get_db),
 ):
     """Generate speech and stream the WAV audio directly without saving to disk."""
+    _require_tts_implementation_revision(data)
     from ..backends import (
         engine_needs_trim,
         engine_retries_runaway,
@@ -412,6 +448,16 @@ async def stream_speech(
         media_type="audio/wav",
         headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
     )
+
+
+@router.post("/generate/stream/exact")
+async def stream_speech_exact(
+    data: models.GenerationRequest,
+    db: Session = Depends(get_db),
+):
+    """Stream only when this server proves the caller's frozen TTS revision."""
+    _require_tts_implementation_revision(data, required=True)
+    return await stream_speech(data, db)
 
 
 @router.post("/generate/import", response_model=models.GenerationResponse)

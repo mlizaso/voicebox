@@ -97,6 +97,12 @@ class GenerationRequest(BaseModel):
         default=50, ge=0, le=500, description="Crossfade duration in ms between chunks (0 for hard cut)"
     )
     normalize: bool = Field(default=True, description="Normalize output audio volume")
+    tts_implementation_revision: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="Exact server TTS implementation required before accepting generation",
+    )
     effects_chain: Optional[List["EffectConfig"]] = Field(
         None, description="Effects chain to apply after generation (overrides profile default)"
     )
@@ -443,6 +449,7 @@ class HealthResponse(BaseModel):
     vram_used_mb: Optional[float] = None
     backend_type: Optional[str] = None  # Backend type (mlx or pytorch)
     backend_variant: Optional[str] = None  # Binary variant (cpu, cuda, or rocm)
+    tts_implementation_revision: str | None = None
     supports_rocm: bool = False  # AMD GPU on Windows — the ROCm backend is applicable
     gpu_compatibility_warning: Optional[str] = None  # Warning if GPU arch unsupported
 

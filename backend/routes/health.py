@@ -176,6 +176,12 @@ async def health():
     elif has_xpu:
         default_variant = "xpu"
 
+    tts_implementation_revision = None
+    if backend_type == "mlx":
+        from ..backends import get_tts_implementation_revision
+
+        tts_implementation_revision = get_tts_implementation_revision()
+
     return models.HealthResponse(
         status="healthy",
         model_loaded=model_loaded,
@@ -186,6 +192,7 @@ async def health():
         vram_used_mb=vram_used,
         backend_type=backend_type,
         backend_variant=os.environ.get("VOICEBOX_BACKEND_VARIANT", default_variant),
+        tts_implementation_revision=tts_implementation_revision,
         supports_rocm=is_amd_gpu_windows(),
         gpu_compatibility_warning=gpu_compat_warning,
     )

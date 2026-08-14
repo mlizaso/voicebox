@@ -667,6 +667,16 @@ def get_tts_backend() -> TTSBackend:
     return get_tts_backend_for_engine("qwen")
 
 
+def get_tts_implementation_revision() -> str | None:
+    """Return the exact TTS numerical identity advertised by this runtime."""
+    if get_backend_type() != "mlx":
+        return None
+
+    from .mlx_runtime import get_mlx_qwen_tts_implementation_revision
+
+    return get_mlx_qwen_tts_implementation_revision()
+
+
 def get_tts_backend_for_engine(engine: str) -> TTSBackend:
     """
     Get or create a TTS backend for the given engine.
