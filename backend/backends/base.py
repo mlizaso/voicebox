@@ -26,6 +26,7 @@ def is_model_cached(
     *,
     weight_extensions: tuple[str, ...] = (".safetensors", ".bin"),
     required_files: Optional[list[str]] = None,
+    revision: str | None = None,
 ) -> bool:
     """
     Check if a HuggingFace model is fully cached locally.
@@ -35,6 +36,7 @@ def is_model_cached(
         weight_extensions: File extensions that count as model weights.
         required_files: If set, check that these specific filenames exist
                         in snapshots instead of checking by extension.
+        revision: If set to an exact commit, inspect only that snapshot.
 
     Returns:
         True if model is fully cached, False if missing or incomplete.
@@ -56,17 +58,20 @@ def is_model_cached(
         snapshots_dir = repo_cache / "snapshots"
         if not snapshots_dir.exists():
             return False
+        snapshot_root = snapshots_dir / revision if revision else snapshots_dir
+        if not snapshot_root.exists():
+            return False
 
         if required_files:
             # Check that every required filename exists somewhere in snapshots
             for fname in required_files:
-                if not any(snapshots_dir.rglob(fname)):
+                if not any(snapshot_root.rglob(fname)):
                     return False
             return True
 
         # Check that at least one weight file exists
         for ext in weight_extensions:
-            if any(snapshots_dir.rglob(f"*{ext}")):
+            if any(snapshot_root.rglob(f"*{ext}")):
                 return True
 
         logger.debug(f"No model weights found for {hf_repo}")

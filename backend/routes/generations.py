@@ -1,6 +1,7 @@
 """TTS generation endpoints."""
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from pathlib import Path
@@ -10,8 +11,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
-from ..services import history, personality, profiles, tts
 from ..database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile, get_db
+from ..services import history, personality, profiles, tts
 from ..services.generation import run_generation
 from ..services.task_queue import cancel_generation as cancel_generation_job, enqueue_generation
 from ..utils.audio import load_audio
@@ -29,11 +30,7 @@ IMPORT_AUDIO_MAX_BYTES = 200 * 1024 * 1024  # 200 MB
 def _get_or_create_import_profile(db: Session) -> DBVoiceProfile:
     """Singleton profile every imported audio clip points at — keeps the
     Generation FK happy without making profile_id nullable across the schema."""
-    row = (
-        db.query(DBVoiceProfile)
-        .filter(DBVoiceProfile.name == IMPORTED_AUDIO_PROFILE_NAME)
-        .first()
-    )
+    row = db.query(DBVoiceProfile).filter(DBVoiceProfile.name == IMPORTED_AUDIO_PROFILE_NAME).first()
     if row is not None:
         return row
     row = DBVoiceProfile(
@@ -53,7 +50,13 @@ def _resolve_generation_engine(data: models.GenerationRequest, profile) -> str:
     return data.engine or getattr(profile, "default_engine", None) or getattr(profile, "preset_engine", None) or "qwen"
 
 
-def _require_tts_implementation_revision(data: models.GenerationRequest, *, required: bool = False) -> None:
+def _require_tts_implementation_revision(
+    data: models.GenerationRequest,
+    *,
+    required: bool = False,
+    engine: str | None = None,
+    model_size: str | None = None,
+) -> None:
     """Reject a request whose frozen TTS implementation is not this server."""
     expected = data.tts_implementation_revision
     if expected is None:
@@ -75,6 +78,19 @@ def _require_tts_implementation_revision(data: models.GenerationRequest, *, requ
                 f"running {actual!r}; restart the matching Voicebox backend"
             ),
         )
+    if engine is None:
+        return
+    if engine != "qwen":
+        raise HTTPException(
+            status_code=422,
+            detail="tts_implementation_revision is only valid for the pinned Qwen MLX engine",
+        )
+    from ..backends.mlx_runtime import get_mlx_qwen_tts_model_spec
+
+    try:
+        get_mlx_qwen_tts_model_spec(model_size or "1.7B")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/generate", response_model=models.GenerationResponse)
@@ -97,9 +113,10 @@ async def generate_speech(
     try:
         profiles.validate_profile_engine(profile, engine)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     model_size = (data.model_size or "1.7B") if engine_has_model_sizes(engine) else None
+    _require_tts_implementation_revision(data, engine=engine, model_size=model_size)
 
     text = data.text
     source = "manual"
@@ -107,7 +124,7 @@ async def generate_speech(
         try:
             llm_result = await personality.rewrite_as_profile(profile.personality, data.text)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         text = llm_result.text.strip()
         if not text:
             raise HTTPException(status_code=500, detail="LLM produced empty output; nothing to speak.")
@@ -143,10 +160,8 @@ async def generate_speech(
 
         profile_obj = db.query(DBVoiceProfile).filter_by(id=data.profile_id).first()
         if profile_obj and profile_obj.effects_chain:
-            try:
+            with contextlib.suppress(Exception):
                 effects_chain_config = _json.loads(profile_obj.effects_chain)
-            except Exception:
-                pass
 
     enqueue_generation(
         generation_id,
@@ -164,7 +179,7 @@ async def generate_speech(
             mode="generate",
             max_chunk_chars=data.max_chunk_chars,
             crossfade_ms=data.crossfade_ms,
-        )
+        ),
     )
 
     return generation
@@ -216,7 +231,7 @@ async def retry_generation(generation_id: str, db: Session = Depends(get_db)):
             seed=gen.seed,
             instruct=gen.instruct,
             mode="retry",
-        )
+        ),
     )
 
     return models.GenerationResponse.model_validate(gen)
@@ -261,7 +276,7 @@ async def regenerate_generation(generation_id: str, db: Session = Depends(get_db
             instruct=gen.instruct,
             mode="regenerate",
             version_id=version_id,
-        )
+        ),
     )
 
     return models.GenerationResponse.model_validate(gen)
@@ -373,9 +388,10 @@ async def stream_speech(
     try:
         profiles.validate_profile_engine(profile, engine)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     tts_model = get_tts_backend_for_engine(engine)
     model_size = data.model_size or "1.7B"
+    _require_tts_implementation_revision(data, engine=engine, model_size=model_size)
 
     await ensure_model_cached_or_raise(engine, model_size)
     await load_engine_model(engine, model_size)
@@ -502,10 +518,8 @@ async def import_audio(
         audio, sr = load_audio(str(target))
         duration = float(len(audio) / sr) if sr else 0.0
     except Exception as decode_err:
-        try:
+        with contextlib.suppress(OSError):
             target.unlink()
-        except OSError:
-            pass
         raise HTTPException(
             status_code=400,
             detail=f"Could not decode audio: {decode_err}",

@@ -88,6 +88,34 @@ def test_exact_route_dispatches_matching_revision(monkeypatch):
     dispatch.assert_awaited_once_with(request, db)
 
 
+@pytest.mark.parametrize(
+    ("engine", "model_size", "detail"),
+    [
+        ("kokoro", None, "only valid for the pinned Qwen"),
+        ("qwen", "1B", "Unsupported pinned MLX Qwen TTS model size"),
+    ],
+)
+def test_matching_revision_rejects_uncovered_engine_or_model_before_generation(monkeypatch, engine, model_size, detail):
+    monkeypatch.setattr(
+        "backend.backends.get_tts_implementation_revision",
+        lambda: "saved-revision",
+    )
+    request = _request("saved-revision")
+    request.engine = engine
+    request.model_size = model_size
+
+    with pytest.raises(HTTPException) as raised:
+        generations._require_tts_implementation_revision(
+            request,
+            required=True,
+            engine=engine,
+            model_size=model_size,
+        )
+
+    assert raised.value.status_code == 422
+    assert detail in raised.value.detail
+
+
 def test_exact_stream_rejects_mismatch_before_dispatch(monkeypatch):
     dispatch = AsyncMock(side_effect=AssertionError("must not start streaming"))
     monkeypatch.setattr(generations, "stream_speech", dispatch)

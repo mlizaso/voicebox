@@ -7,9 +7,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
-from ..services import export_import, history
 from ..app import safe_content_disposition
 from ..database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile, get_db
+from ..services import export_import, history
 
 router = APIRouter()
 
@@ -86,6 +86,7 @@ async def get_generation(
         raise HTTPException(status_code=404, detail="Generation not found")
 
     gen, profile_name = result
+    versions, active_version_id = history._get_versions_for_generation(gen.id, db)
     return models.HistoryResponse(
         id=gen.id,
         profile_id=gen.profile_id,
@@ -102,6 +103,8 @@ async def get_generation(
         error=gen.error,
         is_favorited=bool(gen.is_favorited),
         created_at=gen.created_at,
+        versions=versions,
+        active_version_id=active_version_id,
     )
 
 

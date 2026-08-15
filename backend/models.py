@@ -457,6 +457,7 @@ class HealthResponse(BaseModel):
 class DirectoryCheck(BaseModel):
     """Health status for a single directory."""
 
+    name: str
     path: str
     exists: bool
     writable: bool

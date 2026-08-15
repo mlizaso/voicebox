@@ -1,7 +1,9 @@
 # MLX-specific dependencies (Apple Silicon only)
 # These should only be installed on aarch64-apple-darwin platforms
 
-mlx>=0.30.0
+# This exact numerical runtime is part of the advertised Qwen TTS identity.
+# mlx pins the matching mlx-metal distribution on macOS.
+mlx==0.32.0
 
 # miniaudio is a runtime dep of mlx-audio's STT path (mlx_audio.stt).
 # mlx-audio itself is installed --no-deps (see comment below), so we

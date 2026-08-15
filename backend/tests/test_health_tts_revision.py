@@ -9,7 +9,7 @@ from backend.backends.mlx_runtime import MLX_QWEN_TTS_IMPLEMENTATION_REVISION
 from backend.routes import health as health_route
 
 
-def test_health_exposes_mlx_qwen_runtime_revision(monkeypatch):
+def _mlx_health_response(monkeypatch, revision):
     backend = SimpleNamespace(is_loaded=lambda: False)
     monkeypatch.setattr(health_route.tts, "get_tts_model", lambda: backend)
     monkeypatch.setattr(health_route, "get_backend_type", lambda: "mlx")
@@ -23,10 +23,21 @@ def test_health_exposes_mlx_qwen_runtime_revision(monkeypatch):
     monkeypatch.setattr(
         backends,
         "get_tts_implementation_revision",
-        lambda: MLX_QWEN_TTS_IMPLEMENTATION_REVISION,
+        lambda: revision,
     )
 
-    response = asyncio.run(health_route.health())
+    return asyncio.run(health_route.health())
+
+
+def test_health_exposes_mlx_qwen_runtime_revision(monkeypatch):
+    response = _mlx_health_response(monkeypatch, MLX_QWEN_TTS_IMPLEMENTATION_REVISION)
 
     assert response.status == "healthy"
     assert response.tts_implementation_revision == MLX_QWEN_TTS_IMPLEMENTATION_REVISION
+
+
+def test_health_omits_an_unverified_mlx_qwen_runtime_revision(monkeypatch):
+    response = _mlx_health_response(monkeypatch, None)
+
+    assert response.status == "healthy"
+    assert response.tts_implementation_revision is None

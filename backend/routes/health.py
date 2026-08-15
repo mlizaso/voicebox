@@ -1,24 +1,37 @@
 """Health and infrastructure endpoints."""
 
 import asyncio
+import contextlib
 import os
 import signal
+import tempfile
 from pathlib import Path
 
 import torch
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
 
 from .. import config, models
 from ..services import tts
-from ..database import get_db
 from ..utils.platform_detect import get_backend_type, is_amd_gpu_windows
 
 router = APIRouter()
+_shutdown_tasks: set[asyncio.Task] = set()
 
 # Frontend build directory — present in Docker, absent in dev/API-only mode
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
+
+
+def _probe_directory_writable(directory: Path) -> None:
+    """Durably probe one directory without racing another health request."""
+    descriptor, raw_probe = tempfile.mkstemp(prefix=".voicebox-probe-", dir=directory)
+    probe = Path(raw_probe)
+    try:
+        os.write(descriptor, b"ok\n")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+        probe.unlink(missing_ok=True)
 
 
 @router.get("/")
@@ -40,7 +53,9 @@ async def shutdown():
         await asyncio.sleep(0.1)
         os.kill(os.getpid(), signal.SIGTERM)
 
-    asyncio.create_task(shutdown_async())
+    task = asyncio.create_task(shutdown_async())
+    _shutdown_tasks.add(task)
+    task.add_done_callback(_shutdown_tasks.discard)
     return {"message": "Shutting down..."}
 
 
@@ -57,7 +72,6 @@ async def watchdog_disable():
 async def health():
     """Health check endpoint."""
     from huggingface_hub import constants as hf_constants
-    from pathlib import Path
 
     tts_model = tts.get_tts_model()
     backend_type = get_backend_type()
@@ -120,10 +134,8 @@ async def health():
     if has_cuda:
         vram_used = torch.cuda.memory_allocated() / 1024 / 1024
     elif has_xpu:
-        try:
+        with contextlib.suppress(Exception):
             vram_used = torch.xpu.memory_allocated() / 1024 / 1024
-        except Exception:
-            pass  # memory_allocated() may not be available on all IPEX versions
 
     model_loaded = False
     model_size = None
@@ -213,25 +225,18 @@ async def filesystem_health():
     checks: list[models.DirectoryCheck] = []
     all_ok = True
 
-    for _label, dir_path in dirs_to_check.items():
+    for label, dir_path in dirs_to_check.items():
         exists = dir_path.exists()
         writable = False
         error = None
         if exists:
-            probe = dir_path / ".voicebox_probe"
             try:
-                probe.write_text("ok")
-                probe.unlink()
+                _probe_directory_writable(dir_path)
                 writable = True
             except PermissionError:
                 error = "Permission denied"
             except OSError as e:
                 error = str(e)
-            finally:
-                try:
-                    probe.unlink(missing_ok=True)
-                except Exception:
-                    pass
         else:
             error = "Directory does not exist"
 
@@ -240,6 +245,7 @@ async def filesystem_health():
 
         checks.append(
             models.DirectoryCheck(
+                name=label,
                 path=str(dir_path.resolve()),
                 exists=exists,
                 writable=writable,

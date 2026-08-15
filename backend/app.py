@@ -9,6 +9,8 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from .utils.rocm_env import should_probe_rocminfo
+
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter to add colors matching uvicorn's style."""
@@ -49,7 +51,9 @@ if not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
 # Only set HSA_OVERRIDE_GFX_VERSION for older GPUs that need it.
 # RDNA 3+ (gfx1100+) and RDNA 4 (gfx1200+) are natively supported by ROCm
 # and the override can cause suboptimal performance or errors.
-if not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+# rocminfo is ROCm tooling. macOS uses Metal/MLX and must not probe or warn about a Linux AMD
+# utility that is intentionally absent; the warning looked like the reason startup had failed.
+if should_probe_rocminfo(sys.platform) and not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
     try:
         result = subprocess.run(
             ["rocminfo"],
@@ -102,6 +106,7 @@ if not os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
 if not os.environ.get("MIOPEN_LOG_LEVEL"):
     os.environ["MIOPEN_LOG_LEVEL"] = "4"
 
+logger.info("Loading Voicebox dependencies; first startup can take up to a minute...")
 import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

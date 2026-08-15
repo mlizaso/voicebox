@@ -64,14 +64,20 @@ def to_storage_path(path: str | Path) -> str:
     """Convert a filesystem path to a DB-safe path relative to the data dir."""
     resolved_path = Path(path).resolve()
 
+    # Prefer the exact configured root.  A custom root may itself live below a
+    # directory named ``data`` (for example ``/srv/data/voicebox``); applying
+    # the legacy rebasing rule first would store ``voicebox/profiles/...`` and
+    # later resolve it as ``<root>/voicebox/profiles/...``.
+    try:
+        return str(resolved_path.relative_to(_data_dir))
+    except ValueError:
+        pass
+
     relative_to_any_data_dir = _path_relative_to_any_data_dir(resolved_path)
     if relative_to_any_data_dir is not None:
         return str(relative_to_any_data_dir)
 
-    try:
-        return str(resolved_path.relative_to(_data_dir))
-    except ValueError:
-        return str(resolved_path)
+    return str(resolved_path)
 
 
 def resolve_storage_path(path: str | Path | None) -> Path | None:
@@ -86,6 +92,14 @@ def resolve_storage_path(path: str | Path | None) -> Path | None:
     if not stored_path.parts:
         return None
     if stored_path.is_absolute():
+        resolved_path = stored_path.resolve()
+        try:
+            resolved_path.relative_to(_data_dir)
+        except ValueError:
+            pass
+        else:
+            return resolved_path
+
         rebased_path = _path_relative_to_any_data_dir(stored_path)
         if rebased_path is not None:
             candidate = (_data_dir / rebased_path).resolve()
@@ -98,9 +112,7 @@ def resolve_storage_path(path: str | Path | None) -> Path | None:
     # baked in (e.g. "data/profiles/..."). Joining those directly with
     # _data_dir produces a spurious "<data_dir>/data/profiles/..." nest.
     if stored_path.parts and stored_path.parts[0] == "data":
-        stored_path = (
-            Path(*stored_path.parts[1:]) if len(stored_path.parts) > 1 else Path()
-        )
+        stored_path = Path(*stored_path.parts[1:]) if len(stored_path.parts) > 1 else Path()
 
     return (_data_dir / stored_path).resolve()
 

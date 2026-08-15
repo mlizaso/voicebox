@@ -23,6 +23,7 @@ from .base import is_model_cached, combine_voice_prompts as _combine_voice_promp
 from .mlx_runtime import (
     MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION as _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION,
     get_installed_mlx_audio_version,
+    get_mlx_qwen_tts_model_spec,
 )
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
 
@@ -119,23 +120,21 @@ class MLXTTSBackend:
         Returns:
             HuggingFace Hub model ID for MLX
         """
-        mlx_model_map = {
-            "1.7B": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16",
-            "0.6B": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
-        }
-
-        if model_size not in mlx_model_map:
-            raise ValueError(f"Unknown model size: {model_size}")
-
-        hf_model_id = mlx_model_map[model_size]
+        hf_model_id, _revision = get_mlx_qwen_tts_model_spec(model_size)
         logger.info("Will download MLX model from HuggingFace Hub: %s", hf_model_id)
 
         return hf_model_id
+
+    def _get_model_revision(self, model_size: str) -> str:
+        """Return the immutable Hugging Face commit for a supported model size."""
+        _hf_model_id, revision = get_mlx_qwen_tts_model_spec(model_size)
+        return revision
 
     def _is_model_cached(self, model_size: str) -> bool:
         return is_model_cached(
             self._get_model_path(model_size),
             weight_extensions=(".safetensors", ".bin", ".npz"),
+            revision=self._get_model_revision(model_size),
         )
 
     async def load_model_async(self, model_size: Optional[str] = None):
@@ -165,6 +164,7 @@ class MLXTTSBackend:
     def _load_model_sync(self, model_size: str):
         """Synchronous model loading."""
         model_path = self._get_model_path(model_size)
+        model_revision = self._get_model_revision(model_size)
         model_name = f"qwen-tts-{model_size}"
         is_cached = self._is_model_cached(model_size)
 
@@ -175,7 +175,7 @@ class MLXTTSBackend:
 
             logger.info("Loading MLX TTS model %s...", model_size)
 
-            loaded_model = load(model_path)
+            loaded_model = load(model_path, revision=model_revision)
             backport_applied = _apply_mlx_audio_qwen_dtype_backport(loaded_model, mlx_audio_version)
             is_qwen_model = (
                 getattr(loaded_model, "model_type", None) == _MLX_AUDIO_QWEN_MODEL_TYPE

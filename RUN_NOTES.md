@@ -76,8 +76,8 @@ Out of scope:
 
 ## Implementation findings and choices
 
-- The interrupted `La balada de Soi Cowboy` render still contains 16 of 33 current-contract WAV
-  units, totalling 12,073.696 seconds (3 h 21 min 14 s). Three older WAV records are present but
+- The interrupted `La balada de Soi Cowboy` render still contains 17 of 33 current-contract WAV
+  units, totalling 13,418.279 seconds (3 h 43 min 38 s). Two older WAV records are present but
   have a different parameter hash and are deliberately not mixed into the resumed book.
 - The old UUID-era manifest did not record reference-audio hashes. Its currently attached two
   backend sample WAVs were therefore independently regenerated from the frozen `original`
@@ -141,11 +141,81 @@ Out of scope:
 ## Validation record
 
 - Real isolated automatic startup: the launcher started Voicebox on loopback port 18494, reached
-  healthy state, and reported `qwen3-mlx-audio-0.4.1-bf16-speaker-v1`; the test process was stopped
-  afterward without touching the normal 17494 data/service.
+  healthy state, and reported the complete pinned package/model runtime fingerprint; the test
+  process and its temporary data were stopped and removed without touching port 17494 or its data.
 - Voicebox backend regression set: 169 passed, 4 skipped, 1 known flaky progress test deselected;
   the two pre-existing collection/Metal smoke-test blockers were excluded explicitly.
 - Focused exact-generation, MLX backport and clone correctness tests pass, including rejection
   before profile/history/task/queue creation on a runtime mismatch.
 - External launcher recovery, persistence, renderer/assembler, real FFmpeg and stub profile-import
   suites pass. Shell syntax and Python 3.9 compilation pass.
+
+## Follow-up contract — resolve the audiobook “Main findings”
+
+The follow-up request is interpreted as every concrete finding in the four existing
+`makeaudio_audit_{data,pipeline,gui,failure}.json` reports. These reports overlap and predate the
+checkpoint work, so each finding must first be re-tested against the current implementation. A
+finding already fixed is closed with current evidence; a finding that remains reproducible is in
+scope for implementation and regression coverage.
+
+Acceptance checks:
+
+1. EPUB extraction follows the package spine, excludes non-content metadata, preserves headings,
+   and handles short legitimate chapters, lists, tables, drop caps, and Markdown input correctly.
+2. Every output format uses the same declared pitch and loudness contract and remains safe for
+   arbitrary valid paths.
+3. Phrased and chunked renders preserve the exact document/chapter structure and never assemble
+   stale or orphan artifacts.
+4. Voice activation failures, cancellation, logging, saved-job discovery, overwrite behavior,
+   estimates, title/author metadata, Back navigation, and intermediate-storage visibility are
+   truthful in the wizard.
+5. Disk-space checks discover the real backend data directory and prevent a long job from starting
+   when its frozen storage estimate cannot fit safely.
+6. Existing resume/checkpoint, exact-runtime, voice-integrity, and success-only-cleanup guarantees
+   remain green after all fixes.
+
+Out of scope for this follow-up: the separate acoustic QA/calibration findings in
+`findings_consensus.json`; those concern `qa_generated.py` and `VOICE-PROFILE.md`, not the
+`make_audio.py` “Main findings” reports or the requested audiobook execution workflow.
+
+## Follow-up implementation result
+
+- Every reproducible Main finding is closed. Source ingestion now has one normalized contract for
+  EPUB, repaired JSON, Markdown and plain text; it follows EPUB spine order, excludes structural
+  metadata/footnotes/URLs, preserves legitimate short chapters and repairs headings without
+  corrupting normal Spanish prose. The wizard exposes the source/chapter choice as a real step.
+- All containers now share one mastering topology. Multipart chapters are joined in one linear
+  FFmpeg graph with the frozen crossfade, chapter gap, pitch and loudness settings; numeric chapter
+  ordering is correct beyond 999 and apostrophes/UTF-8 output names are safe.
+- Renderer output is assembled only from the current plan and checksum-valid mono 24 kHz PCM16
+  files. Stale, malformed, wrong-version or corrupt records cannot inflate displayed progress or
+  reduce resume storage estimates. Existing final audiobooks are never silently replaced.
+- Storage preflight uses Voicebox's named, writable generations directory, accounts for remaining
+  durable work on resume, and keeps assembly scratch on the preflighted output volume. Launcher,
+  activation, rendering and assembly diagnostics are durable in the saved job.
+- Standalone and wizard voice activation use immutable content-addressed snapshots. History detail
+  now returns clean/original audio versions, so renderers download pre-effects audio before the
+  single final mastering pass.
+- The MLX numerical contract is pinned end to end: package versions, the BF16 speaker-embedding
+  correction, and immutable Hugging Face commits for both supported Qwen model sizes are hashed
+  into `/health` and enforced atomically by `/generate/exact` before any history row or task exists.
+- The only imported UUID-era job is migrated only by its deterministic saved job id and known old
+  contract. Unknown historical caches remain visible but fail closed rather than being mislabeled
+  as current-runtime audio.
+
+## Final validation record
+
+- Current recoverable real work: `legacy-8d6ff27a0cfe383c61ea8837` is paused at 17/33 units
+  (51.5%, 13,418.279 seconds) with its partial WAVs preserved.
+- Focused Voicebox backend matrix: 59 passed, covering macOS ROCm startup, custom storage paths,
+  concurrent filesystem probes, history versions, exact-generation rejection, pinned MLX loading,
+  dtype identity and failure paths.
+- External model-free/FFmpeg matrix: launcher 46, renderer/assembler 27, source parser 11, capacity
+  5, job log 2, phrased version/disk 5, voice activation 8, plus every standalone progress and
+  profile-import check. Localhost stub tests passed outside the restricted socket sandbox.
+- The isolated auto-start check published the required backend on port 18494 and verified the exact
+  runtime revision
+  `qwen3-mlx-audio-0.4.1-bf16-speaker-v1-runtime-sha256-4e83c1b0dc7882c70bfc14054f5436c657bfb9e4d73eb496e0c1b7388e04a46a`.
+- Bash syntax, ShellCheck, Python AST parsing, targeted Ruff checks/format checks and Git diff
+  whitespace checks pass. The repository-wide legacy Ruff/pytest baselines remain as documented
+  above and were not widened into this audiobook fix.
