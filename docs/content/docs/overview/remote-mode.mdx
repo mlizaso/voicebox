@@ -16,7 +16,7 @@ Remote Mode allows you to run the Voicebox backend on a separate machine (like a
 
 ## Architecture
 
-In Remote Mode, the Voicebox desktop app (running on your local machine) communicates with the backend server (running on a remote machine) via HTTP. The local app provides only the user interface, while the remote server handles all the heavy processing including the TTS models, API endpoints, and audio generation.
+In Remote Mode, the Voicebox desktop app (running on your local machine) communicates with the backend server (running on a remote machine) over HTTPS or a loopback tunnel. The local app provides only the user interface, while the remote server handles all the heavy processing including the TTS models, API endpoints, and audio generation.
 
 ## Setting Up Remote Mode
 
@@ -43,24 +43,36 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
     Or just run `just setup` from the repo root, which handles all of this.
   </Step>
 
-  <Step title="Start the Server">
+  <Step title="Start the Server Behind TLS">
     ```bash
-    # Allow external connections
-    uvicorn main:app --host 0.0.0.0 --port 17493
+    # Generate this once and store it in your secret manager.
+    export VOICEBOX_REMOTE_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+    # Keep the public request authority explicit.
+    export VOICEBOX_TRUSTED_HOSTS="voicebox.example"
+
+    # Bind Voicebox to loopback, then publish it through your TLS reverse proxy.
+    uvicorn backend.main:app --host 127.0.0.1 --port 17493
     ```
 
     <Callout type="warn">
-      This exposes the server to your network. Use a firewall or VPN for security.
+      A bearer token authenticates a client but does not encrypt traffic.
+      Voicebox rejects remote API authentication over plain HTTP by default.
+      Configure the proxy to pass the public Host and HTTPS scheme, and trust
+      proxy headers only from the proxy itself.
     </Callout>
   </Step>
 
-  <Step title="Open Firewall">
+  <Step title="Open Only the TLS Listener">
     ```bash
-    # Ubuntu/Debian
-    sudo ufw allow 17493
+    # Example for an HTTPS reverse proxy on Ubuntu/Debian
+    sudo ufw allow 443/tcp
 
     # Or use your cloud provider's firewall settings
     ```
+
+    Keep Voicebox's loopback port `17493` closed to the network. The reverse
+    proxy is the only public listener.
   </Step>
 </Steps>
 
@@ -77,10 +89,16 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
 
   <Step title="Enter Server URL">
     ```
-    http://<server-ip>:17493
+    https://voicebox.example
     ```
 
-    Replace `<server-ip>` with your server's IP address
+    Replace the example with the HTTPS authority configured in
+    `VOICEBOX_TRUSTED_HOSTS`.
+  </Step>
+
+  <Step title="Enter the API Token">
+    Paste the same `VOICEBOX_REMOTE_API_TOKEN` value into **Settings → Server →
+    Remote API token**. Voicebox sends it only to the configured server origin.
   </Step>
 
   <Step title="Test Connection">
@@ -95,7 +113,7 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
 ```bash
 # Launch a GPU instance (e.g., g4dn.xlarge)
 # Install dependencies
-# Start server with --host 0.0.0.0
+# Bind Voicebox to loopback and publish it through an HTTPS reverse proxy
 ```
 
 ### Vast.ai
@@ -117,14 +135,35 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
 ## Security Considerations
 
 <Callout type="warn">
-  The API currently has no authentication. Only use on trusted networks or with a VPN.
+  Never treat a bearer token sent over plain HTTP as secure. Anyone able to
+  observe the connection can replay it. Keep the token out of URLs and logs.
 </Callout>
 
 **Best Practices:**
-- Use a VPN (WireGuard, Tailscale) instead of exposing to the internet
-- Run behind a reverse proxy with authentication (nginx + basic auth)
-- Use HTTPS with SSL certificates
+- Prefer HTTPS, or an SSH loopback tunnel when only one client needs access
+- Keep the built-in bearer token enabled even behind a reverse proxy
+- Run behind an additional reverse-proxy authentication layer when appropriate
 - Firewall rules to limit access to specific IPs
+
+### Loopback tunnel alternative
+
+Keep Voicebox bound to `127.0.0.1` on the server and forward it with SSH:
+
+```bash
+ssh -N -L 17493:127.0.0.1:17493 user@voicebox.example
+```
+
+The client can then use `http://127.0.0.1:17493`; the bearer never crosses a
+plaintext network hop.
+
+### Explicit insecure compatibility mode
+
+Direct `--host 0.0.0.0` is plain HTTP. It remains available for specialized
+deployments only after the operator explicitly sets
+`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1`. This override permits replayable
+credentials and is not a substitute for TLS. The Voicebox browser/desktop
+client still refuses non-loopback `http://` server URLs, so use it only with a
+separately secured transport and a client whose risk you have evaluated.
 
 ## Performance
 

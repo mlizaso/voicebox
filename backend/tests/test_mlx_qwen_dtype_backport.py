@@ -1,6 +1,8 @@
 """Regression tests for Qwen cloning correctness and the mlx-audio 0.4.1 backport."""
 
 import asyncio
+import hashlib
+import logging
 import sys
 from contextlib import nullcontext
 from importlib import metadata
@@ -9,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import backend.backends.mlx_backend as mlx_backend
+import backend.backends.mlx_runtime as mlx_runtime
 from backend.backends.base import is_model_cached
 from backend.backends.mlx_backend import (
     MLXTTSBackend,
@@ -16,9 +19,12 @@ from backend.backends.mlx_backend import (
 )
 from backend.backends.mlx_runtime import (
     MLX_QWEN_TTS_IMPLEMENTATION_REVISION,
+    MLX_QWEN_TTS_LOCAL_NUMERICAL_SOURCE_PATHS,
+    MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS,
     MLX_QWEN_TTS_PINNED_MODELS,
     MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS,
     build_mlx_qwen_tts_implementation_revision,
+    get_current_mlx_qwen_tts_source_fingerprints,
     get_mlx_qwen_tts_implementation_revision,
 )
 
@@ -48,8 +54,15 @@ class _FakeQwenModel:
 
     def __init__(self, talker_dtype="bfloat16"):
         self.talker = _FakeTalker(talker_dtype)
+        self.config = SimpleNamespace(tts_model_type="base")
+        self.speech_tokenizer = SimpleNamespace(has_encoder=True)
+        self.speaker_encoder = SimpleNamespace()
+        self.tokenizer = SimpleNamespace()
         self.extract_calls = []
         self.last_speaker_embedding = None
+
+    def _prepare_icl_generation_inputs(self, text, ref_audio, ref_text, language="auto"):
+        return text, ref_audio, ref_text, language
 
     def extract_speaker_embedding(self, audio, sr=24000):
         self.extract_calls.append((audio, sr))
@@ -95,14 +108,50 @@ def test_runtime_revision_canonically_covers_package_patch_and_pinned_weights():
         "mlx": "0.32.0",
         "mlx-lm": "0.31.1",
         "mlx-metal": "0.32.0",
+        "numpy": "1.26.4",
+        "transformers": "4.57.3",
+        "tokenizers": "0.22.2",
+        "miniaudio": "1.71",
+        "librosa": "0.11.0",
+        "soundfile": "0.14.0",
+        "soxr": "1.1.0",
+        "pedalboard": "0.9.24",
     }
+    assert set(MLX_QWEN_TTS_LOCAL_NUMERICAL_SOURCE_PATHS) == {
+        "backend/models.py",
+        "backend/routes/generations.py",
+        "backend/routes/llm.py",
+        "backend/routes/models.py",
+        "backend/routes/tasks.py",
+        "backend/routes/transcription.py",
+        "backend/backends/__init__.py",
+        "backend/backends/base.py",
+        "backend/backends/mlx_backend.py",
+        "backend/backends/mlx_qwen_optimizations.py",
+        "backend/backends/mlx_tts_lifecycle.py",
+        "backend/backends/qwen_llm_backend.py",
+        "backend/services/exact_chunk_checkpoints.py",
+        "backend/services/effects_processing.py",
+        "backend/services/generation.py",
+        "backend/services/profiles.py",
+        "backend/services/task_queue.py",
+        "backend/services/tts.py",
+        "backend/utils/audio.py",
+        "backend/utils/cache.py",
+        "backend/utils/chunked_tts.py",
+        "backend/utils/disk_reservations.py",
+        "backend/utils/effects.py",
+    }
+    assert get_current_mlx_qwen_tts_source_fingerprints() == MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS
 
     reversed_packages = dict(reversed(MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS.items()))
     reversed_specs = dict(reversed(MLX_QWEN_TTS_PINNED_MODELS.items()))
+    reversed_sources = dict(reversed(MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS.items()))
     assert (
         build_mlx_qwen_tts_implementation_revision(
             runtime_packages=reversed_packages,
             model_revisions=reversed_specs,
+            source_fingerprints=reversed_sources,
         )
         == MLX_QWEN_TTS_IMPLEMENTATION_REVISION
     )
@@ -126,6 +175,40 @@ def test_runtime_revision_canonically_covers_package_patch_and_pinned_weights():
         build_mlx_qwen_tts_implementation_revision(patch_revision="bf16-speaker-v2")
         != MLX_QWEN_TTS_IMPLEMENTATION_REVISION
     )
+    changed_sources = dict(MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS)
+    changed_sources["voicebox-mlx"] = "0" * 64
+    assert (
+        build_mlx_qwen_tts_implementation_revision(source_fingerprints=changed_sources)
+        != MLX_QWEN_TTS_IMPLEMENTATION_REVISION
+    )
+
+
+def test_runtime_revision_is_absent_when_numerical_source_is_edited(monkeypatch):
+    monkeypatch.setattr(
+        metadata,
+        "version",
+        MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS.__getitem__,
+    )
+    changed_sources = dict(MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS)
+    changed_sources["mlx-audio-qwen3-tts"] = "0" * 64
+    monkeypatch.setattr(
+        mlx_runtime,
+        "get_current_mlx_qwen_tts_source_fingerprints",
+        lambda: changed_sources,
+    )
+
+    assert get_mlx_qwen_tts_implementation_revision() is None
+
+
+def test_frozen_runtime_uses_build_verified_embedded_source_fingerprints(
+    monkeypatch,
+):
+    get_current_mlx_qwen_tts_source_fingerprints.cache_clear()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    try:
+        assert get_current_mlx_qwen_tts_source_fingerprints() == MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS
+    finally:
+        get_current_mlx_qwen_tts_source_fingerprints.cache_clear()
 
 
 def test_backport_casts_speaker_embedding_to_talker_dtype():
@@ -354,7 +437,7 @@ def test_model_load_does_not_require_qwen_backport_for_other_models(monkeypatch)
     assert backend._current_model_size == "1.7B"
 
 
-def test_clone_failure_never_falls_back_to_a_generic_voice(tmp_path):
+def test_clone_failure_never_falls_back_to_a_generic_voice(tmp_path, caplog):
     reference = tmp_path / "reference.wav"
     reference.write_bytes(b"reference")
 
@@ -379,14 +462,25 @@ def test_clone_failure_never_falls_back_to_a_generic_voice(tmp_path):
     backend.model = model
     backend._current_model_size = "1.7B"
 
-    with pytest.raises(RuntimeError, match="refusing to generate with a generic voice"):
+    private_text = "Texto privado del libro: el vaquero cabalga al amanecer."
+    with (
+        caplog.at_level(logging.INFO, logger=mlx_backend.__name__),
+        pytest.raises(
+            RuntimeError,
+            match="refusing to generate with a generic voice",
+        ),
+    ):
         asyncio.run(
             backend.generate(
-                "Texto de prueba.",
+                private_text,
                 {"ref_audio": str(reference), "ref_text": "Referencia."},
                 language="es",
             )
         )
+
+    assert private_text not in caplog.text
+    assert f"chars={len(private_text)}" in caplog.text
+    assert f"text_sha256={hashlib.sha256(private_text.encode('utf-8')).hexdigest()[:12]}" in caplog.text
     assert len(model.calls) == 1
     assert model.calls[0]["ref_audio"] == str(reference)
 

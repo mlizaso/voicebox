@@ -5,9 +5,10 @@ This module provides an entry point that works with PyInstaller by using
 absolute imports instead of relative imports.
 """
 
-import sys
 import os
 import re
+import sys
+
 
 # On Windows with --noconsole (PyInstaller), sys.stdout/stderr are None.
 # They can also be broken file objects in some edge cases.
@@ -30,6 +31,7 @@ if not _is_writable(sys.stderr):
 # PyInstaller + multiprocessing: child processes re-execute the frozen binary
 # with internal arguments. freeze_support() handles this and exits early.
 import multiprocessing
+
 multiprocessing.freeze_support()
 
 # In frozen builds, piper_phonemize's espeak-ng C library falls back to
@@ -87,8 +89,6 @@ try:
     # Import the FastAPI app from the backend package
     logger.info("Importing backend.config...")
     from backend import config
-    logger.info("Importing backend.database...")
-    from backend import database
     logger.info("Importing backend.main (this may take a while due to torch/transformers)...")
     from backend.main import app
     logger.info("Backend imports successful")
@@ -242,7 +242,7 @@ if __name__ == "__main__":
             "--host",
             type=str,
             default="127.0.0.1",
-            help="Host to bind to (use 0.0.0.0 for remote access)",
+            help="Host to bind to (prefer loopback behind an HTTPS reverse proxy)",
         )
         parser.add_argument(
             "--port",
@@ -288,11 +288,6 @@ if __name__ == "__main__":
         if args.data_dir:
             logger.info(f"Setting data directory to: {args.data_dir}")
             config.set_data_dir(args.data_dir)
-
-        # Initialize database after data directory is set
-        logger.info("Initializing database...")
-        database.init_db()
-        logger.info("Database initialized successfully")
 
         logger.info(f"Starting uvicorn server on {args.host}:{args.port}...")
         uvicorn.run(

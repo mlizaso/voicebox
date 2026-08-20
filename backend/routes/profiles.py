@@ -1,6 +1,5 @@
 """Voice profile endpoints."""
 
-import io
 import json as _json
 import logging
 import tempfile
@@ -8,18 +7,22 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
 from ..app import safe_content_disposition
 from ..database import VoiceProfile as DBVoiceProfile, get_db
-from ..services import channels, export_import, personality, profiles
+from ..services import channels, export_import, history, personality, profiles
 from ..services.profiles import _profile_to_response
+from ..utils.images import MAX_FILE_SIZE as AVATAR_MAX_FILE_SIZE
+from ..utils.responses import CleanupFileResponse
+from ..utils.upload_limits import UploadSizeLimitError, spool_upload_bounded
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+PROFILE_ARCHIVE_MAX_BYTES = export_import.PROFILE_ARCHIVE_MAX_TOTAL_BYTES + export_import.ARCHIVE_EXPORT_OVERHEAD_BYTES
 
 
 @router.post("/profiles", response_model=models.VoiceProfileResponse)
@@ -30,10 +33,10 @@ async def create_profile(
     """Create a new voice profile."""
     try:
         return await profiles.create_profile(data, db)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/profiles", response_model=list[models.VoiceProfileResponse])
@@ -48,22 +51,34 @@ async def import_profile(
     db: Session = Depends(get_db),
 ):
     """Import a voice profile from a ZIP archive."""
-    MAX_FILE_SIZE = 100 * 1024 * 1024
-
-    content = await file.read()
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024)}MB"
-        )
-
+    archive_path = None
     try:
-        profile = await export_import.import_profile_from_zip(content, db)
+        archive_path = await spool_upload_bounded(
+            file,
+            max_bytes=PROFILE_ARCHIVE_MAX_BYTES,
+            suffix=".zip",
+        )
+        profile = await export_import.import_profile_from_zip(archive_path, db)
         return profile
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except UploadSizeLimitError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"Profile archive is too large (max {exc.max_bytes // (1024 * 1024)} MB)"),
+        ) from exc
+    except export_import.ArchiveImportBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except export_import.ArchiveImportStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to import profile archive",
+        ) from exc
+    finally:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
 
 
 # ── Preset Voice Endpoints ───────────────────────────────────────────
@@ -106,6 +121,7 @@ async def list_preset_voices(engine: str):
         }
     return {"engine": engine, "voices": []}
 
+
 @router.get("/profiles/{profile_id}", response_model=models.VoiceProfileResponse)
 async def get_profile(
     profile_id: str,
@@ -130,8 +146,8 @@ async def update_profile(
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
         return profile
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/profiles/{profile_id}")
@@ -140,10 +156,20 @@ async def delete_profile(
     db: Session = Depends(get_db),
 ):
     """Delete a voice profile."""
-    success = await profiles.delete_profile(profile_id, db)
+    try:
+        success = await profiles.delete_profile(profile_id, db)
+    except profiles.ProfileGenerationActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except history.GenerationInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Profile not found")
-    return {"message": "Profile deleted successfully"}
+    return {
+        "message": (
+            "Profile and associated generation history deleted successfully; "
+            "shared immutable voice snapshots are retained for safe reuse"
+        )
+    }
 
 
 SAMPLE_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -154,7 +180,11 @@ SAMPLE_UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
 async def add_profile_sample(
     profile_id: str,
     file: UploadFile = File(...),
-    reference_text: str = Form(...),
+    reference_text: str = Form(
+        ...,
+        min_length=1,
+        max_length=models.PROFILE_SAMPLE_REFERENCE_TEXT_MAX_CHARS,
+    ),
     db: Session = Depends(get_db),
 ):
     """Add a sample to a voice profile."""
@@ -184,9 +214,9 @@ async def add_profile_sample(
         )
         return sample
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process audio file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process audio file") from e
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -232,18 +262,26 @@ async def upload_profile_avatar(
     db: Session = Depends(get_db),
 ):
     """Upload or update avatar image for a profile."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename or "").suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-
+    tmp_path = None
     try:
-        profile = await profiles.upload_avatar(profile_id, tmp_path, db)
+        suffix = Path(file.filename or "avatar").suffix.lower() or ".img"
+        tmp_path = await spool_upload_bounded(
+            file,
+            max_bytes=AVATAR_MAX_FILE_SIZE,
+            suffix=suffix,
+        )
+        profile = await profiles.upload_avatar(profile_id, str(tmp_path), db)
         return profile
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except UploadSizeLimitError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Avatar is too large (max {exc.max_bytes // (1024 * 1024)} MB)",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 @router.get("/profiles/{profile_id}/avatar")
@@ -262,6 +300,7 @@ async def get_profile_avatar(
     avatar_path = config.resolve_storage_path(profile.avatar_path)
     if avatar_path is None or not avatar_path.exists():
         raise HTTPException(status_code=404, detail="Avatar file not found")
+    db.close()
 
     return FileResponse(avatar_path)
 
@@ -284,27 +323,45 @@ async def export_profile(
     db: Session = Depends(get_db),
 ):
     """Export a voice profile as a ZIP archive."""
+    archive_export = None
+    handed_to_response = False
     try:
         profile = await profiles.get_profile(profile_id, db)
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
+        profile_name = profile.name
 
-        zip_bytes = export_import.export_profile_to_zip(profile_id, db)
+        archive_export = await export_import.export_profile_to_zip(profile_id, db)
 
-        safe_name = "".join(c for c in profile.name if c.isalnum() or c in (" ", "-", "_")).strip()
+        safe_name = "".join(c for c in profile_name if c.isalnum() or c in (" ", "-", "_")).strip()
         if not safe_name:
             safe_name = "profile"
         filename = f"profile-{safe_name}.voicebox.zip"
+        db.close()
 
-        return StreamingResponse(
-            io.BytesIO(zip_bytes),
+        response = CleanupFileResponse(
+            archive_export.path,
             media_type="application/zip",
             headers={"Content-Disposition": safe_content_disposition("attachment", filename)},
+            cleanup=archive_export.cleanup,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        handed_to_response = True
+        return response
+    except HTTPException:
+        raise
+    except export_import.ArchiveExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except export_import.ArchiveExportStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except export_import.ArchiveExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to export profile") from exc
+    finally:
+        if archive_export is not None and not handed_to_response:
+            archive_export.cleanup()
 
 
 @router.get("/profiles/{profile_id}/channels")
@@ -317,7 +374,7 @@ async def get_profile_channels(
         channel_ids = await channels.get_profile_channels(profile_id, db)
         return {"channel_ids": channel_ids}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.put("/profiles/{profile_id}/channels")
@@ -331,7 +388,7 @@ async def set_profile_channels(
         await channels.set_profile_channels(profile_id, data, db)
         return {"message": "Profile channels updated successfully"}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.put("/profiles/{profile_id}/effects", response_model=models.VoiceProfileResponse)
@@ -383,10 +440,10 @@ async def compose_in_character(
     profile = db.query(DBVoiceProfile).filter_by(id=profile_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+    profile_personality = profile.personality
+    db.close()
     try:
-        result = await personality.compose_as_profile(profile.personality)
+        result = await personality.compose_as_profile(profile_personality)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return models.PersonalityTextResponse(
-        text=result.text, model_size=result.model_size
-    )
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return models.PersonalityTextResponse(text=result.text, model_size=result.model_size)

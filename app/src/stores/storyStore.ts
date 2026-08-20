@@ -57,7 +57,13 @@ export const useStoryStore = create<StoryPlaybackState>((set, get) => ({
   play: (storyId, items) => {
     // Calculate total duration from items
     const maxEndTimeMs = Math.max(
-      ...items.map((item) => item.start_time_ms + item.duration * 1000),
+      ...items.map(
+        (item) =>
+          item.start_time_ms +
+          item.duration * 1000 -
+          (item.trim_start_ms || 0) -
+          (item.trim_end_ms || 0),
+      ),
       0,
     );
 
@@ -73,7 +79,8 @@ export const useStoryStore = create<StoryPlaybackState>((set, get) => ({
       storyId,
       itemCount: items.length,
       items: items.map((i) => ({
-        id: i.generation_id,
+        id: i.id,
+        generationId: i.generation_id,
         start: i.start_time_ms,
         duration: i.duration,
       })),

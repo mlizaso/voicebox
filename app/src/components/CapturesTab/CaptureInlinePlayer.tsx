@@ -57,6 +57,7 @@ export function CaptureInlinePlayer({
       dragToSeek: { debounceTime: 0 },
       mediaControls: false,
       backend: 'WebAudio',
+      fetchParams: { credentials: 'include' },
     });
 
     ws.on('ready', () => {

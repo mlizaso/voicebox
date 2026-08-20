@@ -1,17 +1,33 @@
 """Story endpoints."""
 
-import io
-
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from .. import database, models
-from ..services import stories
 from ..app import safe_content_disposition
 from ..database import get_db
+from ..services import stories
 
 router = APIRouter()
+
+
+class _StoryExportFileResponse(FileResponse):
+    """Ensure private export scratch is removed even if the client disconnects."""
+
+    def __init__(self, *args, cleanup, **kwargs):
+        self._cleanup = cleanup
+        super().__init__(*args, background=BackgroundTask(cleanup), **kwargs)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # FileResponse normally invokes its background task only after a
+            # successful send. A broken connection can bypass that call.
+            self._cleanup()
 
 
 @router.get("/stories", response_model=list[models.StoryResponse])
@@ -28,8 +44,8 @@ async def create_story(
     """Create a new story."""
     try:
         return await stories.create_story(data, db)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/stories/{story_id}", response_model=models.StoryDetailResponse)
@@ -115,10 +131,10 @@ async def reorder_story_items(
     db: Session = Depends(get_db),
 ):
     """Reorder story items and recalculate timecodes."""
-    items = await stories.reorder_story_items(story_id, data.generation_ids, db)
+    items = await stories.reorder_story_items(story_id, data.item_ids, db)
     if items is None:
         raise HTTPException(
-            status_code=400, detail="Invalid reorder request - ensure all generation IDs belong to this story"
+            status_code=400, detail="Invalid reorder request - ensure all item IDs belong to this story"
         )
     return items
 
@@ -158,7 +174,7 @@ async def update_story_item_volume(
     data: models.StoryItemVolumeUpdate,
     db: Session = Depends(get_db),
 ):
-    """Set a story item's per-clip volume (linear gain, 0.0–2.0)."""
+    """Set a story item's per-clip volume (linear gain, 0.0-2.0)."""
     item = await stories.update_story_item_volume(story_id, item_id, data, db)
     if item is None:
         raise HTTPException(status_code=404, detail="Story item not found")
@@ -212,26 +228,42 @@ async def export_story_audio(
     db: Session = Depends(get_db),
 ):
     """Export story as single mixed audio file."""
+    audio_export = None
+    handed_to_response = False
     try:
         story = db.query(database.Story).filter_by(id=story_id).first()
         if not story:
             raise HTTPException(status_code=404, detail="Story not found")
+        story_name = story.name
 
-        audio_bytes = await stories.export_story_audio(story_id, db)
-        if not audio_bytes:
+        audio_export = await stories.export_story_audio(story_id, db)
+        if not audio_export:
             raise HTTPException(status_code=400, detail="Story has no audio items")
 
-        safe_name = "".join(c for c in story.name if c.isalnum() or c in (" ", "-", "_")).strip()
+        safe_name = "".join(c for c in story_name if c.isalnum() or c in (" ", "-", "_")).strip()
         if not safe_name:
             safe_name = "story"
         filename = f"{safe_name}.wav"
+        db.close()
 
-        return StreamingResponse(
-            io.BytesIO(audio_bytes),
+        response = _StoryExportFileResponse(
+            audio_export.path,
             media_type="audio/wav",
             headers={"Content-Disposition": safe_content_disposition("attachment", filename)},
+            cleanup=audio_export.cleanup,
         )
+        handed_to_response = True
+        return response
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except stories.StoryAudioExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except stories.StoryAudioExportBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc), headers={"Retry-After": "1"}) from exc
+    except stories.StoryAudioExportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to export story audio") from exc
+    finally:
+        if audio_export is not None and not handed_to_response:
+            audio_export.cleanup()

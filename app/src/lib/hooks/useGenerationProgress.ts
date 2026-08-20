@@ -1,6 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { useToast } from '@/components/ui/use-toast';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import { useGenerationSettings } from '@/lib/hooks/useSettings';
 import { useGenerationStore } from '@/stores/generationStore';
@@ -70,7 +71,7 @@ export function useGenerationProgress() {
       if (currentSources.has(id)) continue;
 
       const url = apiClient.getGenerationStatusUrl(id);
-      const source = new EventSource(url);
+      const source = authenticatedEventSource(url);
 
       source.onmessage = (event) => {
         try {

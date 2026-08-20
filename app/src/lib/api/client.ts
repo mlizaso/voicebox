@@ -1,5 +1,6 @@
 import type { LanguageCode } from '@/lib/constants/languages';
 import { useServerStore } from '@/stores/serverStore';
+import { authenticatedFetch } from './authenticatedFetch';
 import type {
   ActiveTasksResponse,
   ApplyEffectsRequest,
@@ -78,7 +79,7 @@ class ApiClient {
 
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.getBaseUrl()}${endpoint}`;
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -155,7 +156,7 @@ class ApiClient {
     formData.append('file', file);
     formData.append('reference_text', referenceText);
 
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       body: formData,
     });
@@ -192,7 +193,7 @@ class ApiClient {
 
   async exportProfile(profileId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/export`;
-    const response = await fetch(url);
+    const response = await authenticatedFetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -209,7 +210,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       body: formData,
     });
@@ -229,7 +230,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       body: formData,
     });
@@ -279,7 +280,7 @@ class ApiClient {
   async importAudio(file: File): Promise<GenerationResponse> {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${this.getBaseUrl()}/generate/import`, {
+    const res = await authenticatedFetch(`${this.getBaseUrl()}/generate/import`, {
       method: 'POST',
       body: form,
     });
@@ -328,7 +329,7 @@ class ApiClient {
 
   async exportGeneration(generationId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export`;
-    const response = await fetch(url);
+    const response = await authenticatedFetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -342,7 +343,7 @@ class ApiClient {
 
   async exportGenerationAudio(generationId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export-audio`;
-    const response = await fetch(url);
+    const response = await authenticatedFetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -365,7 +366,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       body: formData,
     });
@@ -410,7 +411,7 @@ class ApiClient {
     }
 
     const url = `${this.getBaseUrl()}/transcribe`;
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       body: formData,
     });
@@ -427,9 +428,7 @@ class ApiClient {
 
   // Captures
   async listCaptures(limit = 50, offset = 0): Promise<CaptureListResponse> {
-    return this.request<CaptureListResponse>(
-      `/captures?limit=${limit}&offset=${offset}`,
-    );
+    return this.request<CaptureListResponse>(`/captures?limit=${limit}&offset=${offset}`);
   }
 
   async getCapture(captureId: string): Promise<CaptureResponse> {
@@ -451,7 +450,7 @@ class ApiClient {
     if (options?.sttModel) formData.append('stt_model', options.sttModel);
 
     const url = `${this.getBaseUrl()}/captures`;
-    const response = await fetch(url, { method: 'POST', body: formData });
+    const response = await authenticatedFetch(url, { method: 'POST', body: formData });
     if (!response.ok) {
       const error = await response.json().catch(() => ({
         detail: response.statusText,
@@ -467,10 +466,7 @@ class ApiClient {
     });
   }
 
-  async refineCapture(
-    captureId: string,
-    body: CaptureRefineRequest,
-  ): Promise<CaptureResponse> {
+  async refineCapture(captureId: string, body: CaptureRefineRequest): Promise<CaptureResponse> {
     return this.request<CaptureResponse>(`/captures/${captureId}/refine`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -511,9 +507,7 @@ class ApiClient {
     return this.request<GenerationSettings>('/settings/generation');
   }
 
-  async updateGenerationSettings(
-    patch: GenerationSettingsUpdate,
-  ): Promise<GenerationSettings> {
+  async updateGenerationSettings(patch: GenerationSettingsUpdate): Promise<GenerationSettings> {
     return this.request<GenerationSettings>('/settings/generation', {
       method: 'PUT',
       body: JSON.stringify(patch),
@@ -525,9 +519,7 @@ class ApiClient {
     return this.request<MCPClientBindingListResponse>('/mcp/bindings');
   }
 
-  async upsertMCPBinding(
-    data: MCPClientBindingUpsert,
-  ): Promise<MCPClientBinding> {
+  async upsertMCPBinding(data: MCPClientBindingUpsert): Promise<MCPClientBinding> {
     return this.request<MCPClientBinding>('/mcp/bindings', {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -535,10 +527,9 @@ class ApiClient {
   }
 
   async deleteMCPBinding(clientId: string): Promise<{ deleted: string }> {
-    return this.request<{ deleted: string }>(
-      `/mcp/bindings/${encodeURIComponent(clientId)}`,
-      { method: 'DELETE' },
-    );
+    return this.request<{ deleted: string }>(`/mcp/bindings/${encodeURIComponent(clientId)}`, {
+      method: 'DELETE',
+    });
   }
 
   // Model Management
@@ -830,9 +821,9 @@ class ApiClient {
     });
   }
 
-  async exportStoryAudio(storyId: string): Promise<Blob> {
+  async exportStoryAudio(storyId: string): Promise<Response> {
     const url = `${this.getBaseUrl()}/stories/${storyId}/export-audio`;
-    const response = await fetch(url);
+    const response = await authenticatedFetch(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -841,7 +832,7 @@ class ApiClient {
       throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
     }
 
-    return response.blob();
+    return response;
   }
 
   // Effects & Versions
@@ -925,7 +916,7 @@ class ApiClient {
 
   async previewEffects(generationId: string, effectsChain: EffectConfig[]): Promise<Blob> {
     const url = `${this.getBaseUrl()}/effects/preview/${generationId}`;
-    const response = await fetch(url, {
+    const response = await authenticatedFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ effects_chain: effectsChain }),

@@ -92,6 +92,15 @@ Detection is handled by `utils/platform_detect.py`. Both backends implement the 
 | Tasks | `/tasks`, `/cache` | Active task tracking, cache management |
 | CUDA | `/backend/cuda-*` | CUDA binary download and management |
 
+Story WAV exports are streamed from private, disk-backed scratch rather than
+assembled in RAM. They are limited to 1,000 items and a 24-hour, 24 kHz mono
+timeline (the classic PCM16 WAV size ceiling), with bounded channel, sample-rate,
+decoded-sample, and temporary-disk budgets. Source clips may remain long-form;
+new direct audio uploads retain their separate 30-minute limit. The desktop app
+and browsers with the File System Access API stream downloads directly to disk;
+other browsers cap the in-memory compatibility download at 64 MiB and reject
+larger exports with an actionable error instead of risking tab exhaustion.
+
 ### Quick examples
 
 ```bash
@@ -119,6 +128,73 @@ curl http://localhost:17493/generate/{id}/status
 ```
 
 Default location is the OS-specific app data directory. Override with `--data-dir` or the `VOICEBOX_DATA_DIR` environment variable.
+
+On POSIX systems, Voicebox protects app-owned data directories with mode `0700`
+and files with mode `0600`, and repairs existing owned data at startup without
+following symbolic links. The configured data root and managed top-level
+directories must therefore be real directories, not symlinks. Generated audio
+uses the same private policy by default. For an intentional host-facing export
+or Docker bind mount, set
+`VOICEBOX_SHARED_GENERATIONS=1`. The data root then permits traversal without
+listing (`0711`), while `generations/` uses `0755` directories and `0644`
+files. The database, voice profiles, cache, captures, and logs remain private.
+The provided `docker-compose.yml` enables this mode for its `./output` bind
+mount.
+
+### Local API security
+
+The API accepts `Host` values for loopback and the Tauri webview by default and
+rejects other authorities, which prevents browser DNS-rebinding. Browser
+requests must also use the same origin as the API or one of the built-in local
+development/Tauri origins. Originless clients such as `curl`, the audiobook
+launcher, and health checks continue to work.
+
+Remote access is an explicit opt-in. Add every remote API hostname or address
+to the comma-separated `VOICEBOX_TRUSTED_HOSTS` setting. If a browser UI is
+hosted on a different origin, add each full origin to
+`VOICEBOX_CORS_ORIGINS` as well. Wildcards are intentionally rejected for both
+settings; reverse proxies must preserve the public `Host` header.
+
+Credential-free access is allowed only when both the actual network peer and
+the requested Host authority are local. Every other request—including a public
+Host forwarded by a same-machine reverse proxy—must authenticate with
+`Authorization: Bearer $VOICEBOX_REMOTE_API_TOKEN`. Set a randomly generated,
+URL-safe token of at least 32 characters before binding beyond loopback, for
+example:
+
+```bash
+export VOICEBOX_REMOTE_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export VOICEBOX_TRUSTED_HOSTS="voicebox.example"
+uvicorn backend.main:app --host 127.0.0.1 --port 17493
+curl -H "Authorization: Bearer $VOICEBOX_REMOTE_API_TOKEN" \
+  https://voicebox.example/health
+```
+
+Publish the loopback listener through an HTTPS reverse proxy. Preserve the
+public Host and HTTPS request scheme, and trust forwarded headers only from
+the proxy address. Direct `--host 0.0.0.0` serves plain HTTP and its protected
+routes return 426 by default. The compatibility escape hatch
+`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1` must be set explicitly; it makes the
+bearer replayable to anyone who can observe the connection and is not suitable
+for ordinary remote deployment.
+
+Loopback CLI clients remain credential-free. The web/desktop client has a
+**Remote API token** field under Settings → Server and never sends that token
+to non-Voicebox origins. Successful bearer authentication establishes an
+HttpOnly session cookie for same-origin media and event streams. Use HTTPS for
+remote deployments or connect through a loopback SSH tunnel. The browser and
+desktop client refuse non-loopback `http://` server URLs. Host and Origin checks
+remain active in addition to the token.
+
+The ASGI receive boundary also rejects oversized declared and chunked bodies
+before Starlette's multipart parser can spool file parts. Limits are matched to
+each upload/import endpoint (plus bounded multipart framing); ordinary JSON is
+capped at 2 MiB and the MCP endpoint retains its documented bounded base64
+transcription allowance. Large multipart admission is capped at two concurrent
+requests and reserves temporary-disk capacity before consuming the body. MCP
+control calls remain concurrent, while a declared or streaming MCP body above
+5 MiB uses a separate one-request memory admission gate. An overloaded server
+returns 429 and low temporary storage returns 507.
 
 ## Code quality
 

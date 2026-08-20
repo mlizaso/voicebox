@@ -28,6 +28,16 @@ services:
     environment:
       - LOG_LEVEL=info
       - NUMBA_CACHE_DIR=/tmp/numba_cache
+      # The ./output bind mount is an intentional host-facing export directory.
+      # DB, profiles, cache, captures, and logs remain private.
+      - VOICEBOX_SHARED_GENERATIONS=1
+      # Docker bridge peers are intentionally treated as network clients. Set
+      # a persistent, randomly generated token before `docker compose up`.
+      - VOICEBOX_REMOTE_API_TOKEN=${VOICEBOX_REMOTE_API_TOKEN:?Set a 32+ character URL-safe remote API token}
+      # The published host listener above is loopback-only, but the final hop
+      # across Docker's private bridge is HTTP and therefore needs the explicit
+      # compatibility override. Do not copy this setting to a public binding.
+      - VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1
 
     networks:
       - voicebox-net

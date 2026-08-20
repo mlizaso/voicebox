@@ -6,7 +6,6 @@ Usage:
     python build_binary.py --cuda    # Build CUDA-enabled server binary
 """
 
-import PyInstaller.__main__
 import argparse
 import logging
 import os
@@ -14,7 +13,37 @@ import platform
 import sys
 from pathlib import Path
 
+import PyInstaller.__main__
+
 logger = logging.getLogger(__name__)
+
+# Keep this tuple aligned with
+# backends.mlx_runtime.MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS. A build-args
+# regression compares them directly, so adding an exact-runtime dependency
+# cannot silently produce a frozen binary whose importlib metadata is absent.
+MLX_RUNTIME_METADATA_DISTRIBUTIONS = (
+    "mlx-audio",
+    "mlx",
+    "mlx-lm",
+    "mlx-metal",
+    "numpy",
+    "transformers",
+    "tokenizers",
+    "miniaudio",
+    "librosa",
+    "soundfile",
+    "soxr",
+    "pedalboard",
+)
+
+
+def _append_copy_metadata(args: list[str], distributions) -> None:
+    """Append PyInstaller metadata flags once per distribution."""
+    existing = {args[index + 1] for index, argument in enumerate(args[:-1]) if argument == "--copy-metadata"}
+    for distribution in distributions:
+        if distribution not in existing:
+            args.extend(["--copy-metadata", distribution])
+            existing.add(distribution)
 
 
 def is_apple_silicon():
@@ -464,6 +493,7 @@ def build_server(cuda=False, rocm=False):
                 "mlx_lm",
             ]
         )
+        _append_copy_metadata(args, MLX_RUNTIME_METADATA_DISTRIBUTIONS)
     elif not cuda and not rocm:
         logger.info("Building for non-Apple Silicon platform - PyTorch only")
 
@@ -668,7 +698,6 @@ def build_server(cuda=False, rocm=False):
                 check=True,
             )
 
-
     logger.info("Binary built in %s", backend_dir / "dist" / binary_name)
 
 
@@ -784,4 +813,3 @@ if __name__ == "__main__":
         build_shim()
     else:
         build_server(cuda=cli_args.cuda, rocm=cli_args.rocm)
-

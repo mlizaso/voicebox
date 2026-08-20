@@ -7,10 +7,9 @@ without hitting the network.
 
 import json
 import tarfile
-import tempfile
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -22,6 +21,7 @@ from backend.utils.progress import get_progress_manager
 def reset_progress_manager():
     """Reset the global progress manager before each test."""
     import backend.utils.progress
+
     backend.utils.progress._progress_manager = None
     yield
     backend.utils.progress._progress_manager = None
@@ -124,7 +124,7 @@ async def test_get_rocm_status_not_installed(mock_backends_dir):
 
 
 @pytest.mark.asyncio
-async def test_download_rocm_binary_progress_reporting(mock_backends_dir, fake_tar_gz, fake_sha256):
+async def test_download_rocm_binary_progress_reporting(mock_backends_dir, fake_tar_gz, fake_sha256, monkeypatch):
     """
     Verify that download_rocm_binary():
     1. Downloads the server archive and ROCm libs archive.
@@ -133,6 +133,7 @@ async def test_download_rocm_binary_progress_reporting(mock_backends_dir, fake_t
     """
     import hashlib
 
+    monkeypatch.setattr(rocm.sys, "platform", "win32")
     server_sha = hashlib.sha256(fake_tar_gz).hexdigest()
     libs_sha = hashlib.sha256(fake_tar_gz).hexdigest()
 

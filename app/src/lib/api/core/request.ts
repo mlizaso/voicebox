@@ -8,6 +8,7 @@ import type { ApiResult } from './ApiResult';
 import { CancelablePromise } from './CancelablePromise';
 import type { OnCancel } from './CancelablePromise';
 import type { OpenAPIConfig } from './OpenAPI';
+import { authenticatedFetch } from '../authenticatedFetch';
 
 export const isDefined = <T>(
   value: T | null | undefined,
@@ -227,7 +228,7 @@ export const sendRequest = async (
 
   onCancel(() => controller.abort());
 
-  return await fetch(url, request);
+  return await authenticatedFetch(url, request);
 };
 
 export const getResponseHeader = (

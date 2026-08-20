@@ -33,7 +33,9 @@ function MiniSamplePlayer({ audioUrl }: MiniSamplePlayerProps) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const audio = new Audio(audioUrl);
+    const audio = new Audio();
+    audio.crossOrigin = 'use-credentials';
+    audio.src = audioUrl;
     audioRef.current = audio;
 
     const handleLoadedMetadata = () => {

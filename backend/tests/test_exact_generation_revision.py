@@ -17,6 +17,7 @@ def _request(revision: str | None) -> models.GenerationRequest:
         language="es",
         engine="qwen",
         model_size="1.7B",
+        seed=123,
         tts_implementation_revision=revision,
     )
 
@@ -62,7 +63,7 @@ def test_mismatched_revision_creates_no_generation_or_queue_job(monkeypatch):
 
 def test_exact_route_requires_revision_before_dispatch(monkeypatch):
     dispatch = AsyncMock(side_effect=AssertionError("must not dispatch without revision"))
-    monkeypatch.setattr(generations, "generate_speech", dispatch)
+    monkeypatch.setattr(generations, "_generate_speech_impl", dispatch)
 
     with pytest.raises(HTTPException) as raised:
         asyncio.run(generations.generate_speech_exact(_request(None), db=object()))
@@ -74,7 +75,7 @@ def test_exact_route_requires_revision_before_dispatch(monkeypatch):
 def test_exact_route_dispatches_matching_revision(monkeypatch):
     sentinel = object()
     dispatch = AsyncMock(return_value=sentinel)
-    monkeypatch.setattr(generations, "generate_speech", dispatch)
+    monkeypatch.setattr(generations, "_generate_speech_impl", dispatch)
     monkeypatch.setattr(
         "backend.backends.get_tts_implementation_revision",
         lambda: "saved-revision",
@@ -85,7 +86,25 @@ def test_exact_route_dispatches_matching_revision(monkeypatch):
     result = asyncio.run(generations.generate_speech_exact(request, db=db))
 
     assert result is sentinel
-    dispatch.assert_awaited_once_with(request, db)
+    dispatch.assert_awaited_once_with(request, db, exact=True)
+
+
+def test_exact_route_rejects_implicit_random_seed_before_dispatch(monkeypatch):
+    dispatch = AsyncMock(side_effect=AssertionError("must not dispatch without a seed"))
+    monkeypatch.setattr(generations, "_generate_speech_impl", dispatch)
+    monkeypatch.setattr(
+        "backend.backends.get_tts_implementation_revision",
+        lambda: "saved-revision",
+    )
+    request = _request("saved-revision")
+    request.seed = None
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(generations.generate_speech_exact(request, db=object()))
+
+    assert raised.value.status_code == 422
+    assert "explicit seed" in raised.value.detail.lower()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -118,7 +137,7 @@ def test_matching_revision_rejects_uncovered_engine_or_model_before_generation(m
 
 def test_exact_stream_rejects_mismatch_before_dispatch(monkeypatch):
     dispatch = AsyncMock(side_effect=AssertionError("must not start streaming"))
-    monkeypatch.setattr(generations, "stream_speech", dispatch)
+    monkeypatch.setattr(generations, "_stream_speech_impl", dispatch)
     monkeypatch.setattr(
         "backend.backends.get_tts_implementation_revision",
         lambda: "running-revision",

@@ -2,25 +2,30 @@
 PyTorch backend implementation for TTS and STT.
 """
 
-from typing import Optional, List, Tuple
 import asyncio
 import logging
-import torch
+from typing import List, Optional, Tuple
+
 import numpy as np
+import torch
 
-logger = logging.getLogger(__name__)
-
-from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
+from ..utils.audio import load_audio
+from ..utils.cache import cache_voice_prompt, get_cache_key, get_cached_voice_prompt
+from . import LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
 from .base import (
-    is_model_cached,
-    get_torch_device,
-    empty_device_cache,
-    manual_seed,
     combine_voice_prompts as _combine_voice_prompts,
+    empty_device_cache,
+    get_torch_device,
+    is_model_cached,
+    manual_seed,
     model_load_progress,
 )
-from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
-from ..utils.audio import load_audio
+from .mlx_tts_lifecycle import (
+    mlx_tts_lifecycle_guard,
+    run_blocking_operation_cancellation_safe,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PyTorchTTSBackend:
@@ -103,6 +108,7 @@ class PyTorchTTSBackend:
             # .hf-cache/hub and .hf-cache/transformers, causing speech_tokenizer
             # and preprocessor_config.json to fail to resolve during load.
             from huggingface_hub import constants as hf_constants
+
             tts_cache_dir = hf_constants.HF_HUB_CACHE
 
             if self.device == "cpu":
@@ -248,6 +254,8 @@ class PyTorchTTSBackend:
 class PyTorchSTTBackend:
     """PyTorch-based STT backend using Whisper."""
 
+    uses_shared_mlx_lifecycle_guard = True
+
     def __init__(self, model_size: str = "base"):
         self.model = None
         self.processor = None
@@ -276,10 +284,22 @@ class PyTorchSTTBackend:
         if model_size is None:
             model_size = self.model_size
 
+        async with mlx_tts_lifecycle_guard.hold("PyTorch STT model loading"):
+            await self._ensure_model_loaded_locked(model_size)
+
+    async def _ensure_model_loaded_locked(self, model_size: str) -> None:
+        """Load one model size while the process lifecycle guard is held."""
+
         if self.model is not None and self.model_size == model_size:
             return
 
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        if self.model is not None:
+            self._unload_model_locked()
+
+        await run_blocking_operation_cancellation_safe(
+            self._load_model_sync,
+            model_size,
+        )
 
     # Alias for compatibility
     load_model = load_model_async
@@ -290,7 +310,7 @@ class PyTorchSTTBackend:
         is_cached = self._is_model_cached(model_size)
 
         with model_load_progress(progress_model_name, is_cached):
-            from transformers import WhisperProcessor, WhisperForConditionalGeneration
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
             model_name = WHISPER_HF_REPOS.get(model_size, f"openai/whisper-{model_size}")
             logger.info("Loading Whisper model %s on %s...", model_size, self.device)
@@ -302,7 +322,7 @@ class PyTorchSTTBackend:
         self.model_size = model_size
         logger.info("Whisper model %s loaded successfully", model_size)
 
-    def unload_model(self):
+    def _unload_model_locked(self):
         """Unload the model to free memory."""
         if self.model is not None:
             del self.model
@@ -313,6 +333,11 @@ class PyTorchSTTBackend:
             empty_device_cache(self.device)
 
             logger.info("Whisper model unloaded")
+
+    def unload_model(self):
+        """Unload the model without racing a live local inference request."""
+        with mlx_tts_lifecycle_guard.try_hold("PyTorch STT model unloading"):
+            self._unload_model_locked()
 
     async def transcribe(
         self,
@@ -331,7 +356,7 @@ class PyTorchSTTBackend:
         Returns:
             Transcribed text
         """
-        await self.load_model_async(model_size)
+        requested_model_size = model_size or self.model_size
 
         def _transcribe_sync():
             """Run synchronous transcription in thread pool."""
@@ -374,5 +399,6 @@ class PyTorchSTTBackend:
 
             return transcription.strip()
 
-        # Run blocking transcription in thread pool
-        return await asyncio.to_thread(_transcribe_sync)
+        async with mlx_tts_lifecycle_guard.hold("PyTorch STT inference"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            return await run_blocking_operation_cancellation_safe(_transcribe_sync)

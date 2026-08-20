@@ -9,6 +9,8 @@ alembic>=1.13.0
 
 # ML models
 torch>=2.2.0
+# Apple Silicon Qwen builds apply exact numerical-runtime overrides from
+# requirements-mlx.txt after these cross-platform ranges.
 transformers>=4.36.0,<=4.57.6
 accelerate>=0.26.0
 huggingface_hub>=0.20.0

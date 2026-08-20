@@ -7,17 +7,18 @@ Provides MLX (Apple Silicon, 4-bit community quants) and PyTorch
 and STT engines.
 """
 
-import asyncio
 import logging
-from typing import Optional
 
-from . import LLMBackend, DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_TEMPERATURE
+from . import DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_TEMPERATURE
 from .base import (
-    is_model_cached,
-    get_torch_device,
     empty_device_cache,
-    manual_seed,
+    get_torch_device,
+    is_model_cached,
     model_load_progress,
+)
+from .mlx_tts_lifecycle import (
+    mlx_tts_lifecycle_guard,
+    run_blocking_operation_cancellation_safe,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,8 @@ def _progress_name(model_size: str) -> str:
 
 def _build_messages(
     prompt: str,
-    system: Optional[str],
-    examples: Optional[list[tuple[str, str]]] = None,
+    system: str | None,
+    examples: list[tuple[str, str]] | None = None,
 ) -> list[dict]:
     messages: list[dict] = []
     if system:
@@ -59,11 +60,17 @@ def _build_messages(
 class PyTorchQwenLLMBackend:
     """Qwen3 LLM backend using HuggingFace transformers."""
 
+    # PyTorch and MLX models share the same process accelerator and mutable
+    # model lifecycle.  Keeping this operation in the owner task lets the
+    # request re-enter the process-wide guard while blocking executor work is
+    # drained before cancellation can release it.
+    uses_shared_mlx_lifecycle_guard = True
+
     def __init__(self, model_size: str = "0.6B"):
         self.model = None
         self.tokenizer = None
         self.model_size = model_size
-        self._current_model_size: Optional[str] = None
+        self._current_model_size: str | None = None
         self.device = self._get_device()
 
     def _get_device(self) -> str:
@@ -80,17 +87,26 @@ class PyTorchQwenLLMBackend:
     def _is_model_cached(self, model_size: str) -> bool:
         return is_model_cached(self._get_model_path(model_size))
 
-    async def load_model(self, model_size: Optional[str] = None) -> None:
+    async def load_model(self, model_size: str | None = None) -> None:
         if model_size is None:
             model_size = self.model_size
+
+        async with mlx_tts_lifecycle_guard.hold("PyTorch LLM model loading"):
+            await self._ensure_model_loaded_locked(model_size)
+
+    async def _ensure_model_loaded_locked(self, model_size: str) -> None:
+        """Load one model size while the process lifecycle guard is held."""
 
         if self.model is not None and self._current_model_size == model_size:
             return
 
         if self.model is not None and self._current_model_size != model_size:
-            self.unload_model()
+            self._unload_model_locked()
 
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        await run_blocking_operation_cancellation_safe(
+            self._load_model_sync,
+            model_size,
+        )
 
     def _load_model_sync(self, model_size: str) -> None:
         import torch
@@ -120,7 +136,7 @@ class PyTorchQwenLLMBackend:
         self.model_size = model_size
         logger.info("Qwen3 %s loaded successfully", model_size)
 
-    def unload_model(self) -> None:
+    def _unload_model_locked(self) -> None:
         if self.model is None:
             return
         del self.model
@@ -131,27 +147,38 @@ class PyTorchQwenLLMBackend:
         empty_device_cache(self.device)
         logger.info("Qwen3 unloaded")
 
+    def unload_model(self) -> None:
+        with mlx_tts_lifecycle_guard.try_hold("PyTorch LLM model unloading"):
+            self._unload_model_locked()
+
     async def generate(
         self,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
         temperature: float = DEFAULT_LLM_TEMPERATURE,
-        model_size: Optional[str] = None,
-        examples: Optional[list[tuple[str, str]]] = None,
+        model_size: str | None = None,
+        examples: list[tuple[str, str]] | None = None,
     ) -> str:
-        await self.load_model(model_size)
-        return await asyncio.to_thread(
-            self._generate_sync, prompt, system, max_tokens, temperature, examples
-        )
+        requested_model_size = model_size or self.model_size
+        async with mlx_tts_lifecycle_guard.hold("PyTorch LLM inference"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            return await run_blocking_operation_cancellation_safe(
+                self._generate_sync,
+                prompt,
+                system,
+                max_tokens,
+                temperature,
+                examples,
+            )
 
     def _generate_sync(
         self,
         prompt: str,
-        system: Optional[str],
+        system: str | None,
         max_tokens: int,
         temperature: float,
-        examples: Optional[list[tuple[str, str]]] = None,
+        examples: list[tuple[str, str]] | None = None,
     ) -> str:
         import torch
 
@@ -185,11 +212,13 @@ class PyTorchQwenLLMBackend:
 class MLXQwenLLMBackend:
     """Qwen3 LLM backend using mlx-lm (Apple Silicon)."""
 
+    uses_shared_mlx_lifecycle_guard = True
+
     def __init__(self, model_size: str = "0.6B"):
         self.model = None
         self.tokenizer = None
         self.model_size = model_size
-        self._current_model_size: Optional[str] = None
+        self._current_model_size: str | None = None
 
     def is_loaded(self) -> bool:
         return self.model is not None
@@ -205,17 +234,24 @@ class MLXQwenLLMBackend:
             weight_extensions=(".safetensors", ".bin", ".npz"),
         )
 
-    async def load_model(self, model_size: Optional[str] = None) -> None:
+    async def load_model(self, model_size: str | None = None) -> None:
         if model_size is None:
             model_size = self.model_size
 
+        async with mlx_tts_lifecycle_guard.hold("MLX LLM model loading"):
+            await self._ensure_model_loaded_locked(model_size)
+
+    async def _ensure_model_loaded_locked(self, model_size: str) -> None:
         if self.model is not None and self._current_model_size == model_size:
             return
 
         if self.model is not None and self._current_model_size != model_size:
-            self.unload_model()
+            self._unload_model_locked()
 
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        await run_blocking_operation_cancellation_safe(
+            self._load_model_sync,
+            model_size,
+        )
 
     def _load_model_sync(self, model_size: str) -> None:
         from mlx_lm import load as mlx_load
@@ -238,7 +274,7 @@ class MLXQwenLLMBackend:
         self.model_size = model_size
         logger.info("Qwen3 %s (MLX) loaded successfully", model_size)
 
-    def unload_model(self) -> None:
+    def _unload_model_locked(self) -> None:
         if self.model is None:
             return
         del self.model
@@ -248,27 +284,38 @@ class MLXQwenLLMBackend:
         self._current_model_size = None
         logger.info("Qwen3 (MLX) unloaded")
 
+    def unload_model(self) -> None:
+        with mlx_tts_lifecycle_guard.try_hold("MLX LLM model unloading"):
+            self._unload_model_locked()
+
     async def generate(
         self,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
         temperature: float = DEFAULT_LLM_TEMPERATURE,
-        model_size: Optional[str] = None,
-        examples: Optional[list[tuple[str, str]]] = None,
+        model_size: str | None = None,
+        examples: list[tuple[str, str]] | None = None,
     ) -> str:
-        await self.load_model(model_size)
-        return await asyncio.to_thread(
-            self._generate_sync, prompt, system, max_tokens, temperature, examples
-        )
+        requested_model_size = model_size or self.model_size
+        async with mlx_tts_lifecycle_guard.hold("MLX LLM inference"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            return await run_blocking_operation_cancellation_safe(
+                self._generate_sync,
+                prompt,
+                system,
+                max_tokens,
+                temperature,
+                examples,
+            )
 
     def _generate_sync(
         self,
         prompt: str,
-        system: Optional[str],
+        system: str | None,
         max_tokens: int,
         temperature: float,
-        examples: Optional[list[tuple[str, str]]] = None,
+        examples: list[tuple[str, str]] | None = None,
     ) -> str:
         from mlx_lm import generate as mlx_generate
         from mlx_lm.sample_utils import make_sampler

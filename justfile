@@ -68,6 +68,7 @@ setup-python:
     {{ pip }} install --no-deps chatterbox-tts
     # HumeAI TADA pins torch>=2.7,<2.8 which conflicts with our torch>=2.1
     {{ pip }} install --no-deps hume-tada
+    {{ pip }} install git+https://github.com/QwenLM/Qwen3-TTS.git
     # Apple Silicon: install MLX backend
     if [ "$(uname -m)" = "arm64" ] && [ "$(uname)" = "Darwin" ]; then
         echo "Detected Apple Silicon — installing MLX dependencies..."
@@ -79,7 +80,6 @@ setup-python:
         {{ pip }} install --no-deps mlx-lm==0.31.1
         {{ pip }} install --no-deps mlx-audio==0.4.1
     fi
-    {{ pip }} install git+https://github.com/QwenLM/Qwen3-TTS.git
     {{ pip }} install pyinstaller ruff pytest pytest-asyncio -q
     echo "Python environment ready."
 

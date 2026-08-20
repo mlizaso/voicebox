@@ -8,16 +8,16 @@ object through every service call.
 """
 
 import asyncio
-import ipaddress
 import logging
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
+from ..api_security import TRUSTED_LOCAL_REQUEST_SCOPE_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -28,31 +28,25 @@ _pending_stamps: set[asyncio.Task] = set()
 CLIENT_ID_HEADER = "X-Voicebox-Client-Id"
 
 # Tool handlers read this to apply per-client voice bindings.
-current_client_id: ContextVar[str | None] = ContextVar(
-    "current_client_id", default=None
-)
+current_client_id: ContextVar[str | None] = ContextVar("current_client_id", default=None)
 
-# Remote address of the in-flight request. Used by tools that gate
-# host-filesystem access to loopback callers (see voicebox.transcribe).
-current_remote_addr: ContextVar[str | None] = ContextVar(
-    "current_remote_addr", default=None
-)
+# Remote address of the in-flight request, retained for request diagnostics.
+current_remote_addr: ContextVar[str | None] = ContextVar("current_remote_addr", default=None)
+
+# Security-boundary locality of the in-flight request. Unlike the socket peer,
+# this stays false for an authenticated remote caller behind a loopback proxy.
+current_request_is_trusted_local: ContextVar[bool] = ContextVar("current_request_is_trusted_local", default=False)
 
 
 def request_is_loopback() -> bool:
-    """True when the in-flight request originated on the loopback interface.
+    """True only for a security-verified local peer and local Host authority.
 
-    Returns False if no request is in flight or the remote address can't be
-    parsed — callers gating filesystem reads on this should treat that as
-    "deny".
+    The outer API security middleware publishes this decision after validating
+    both fields. Missing boundary context fails closed, which prevents a
+    loopback reverse proxy from granting remote callers host-filesystem access.
     """
-    addr = current_remote_addr.get()
-    if not addr:
-        return False
-    try:
-        return ipaddress.ip_address(addr).is_loopback
-    except ValueError:
-        return False
+    return current_request_is_trusted_local.get()
+
 
 # Endpoints that consume X-Voicebox-Client-Id for its MCP-semantic
 # meaning (per-client profile resolution + per-client default_personality).
@@ -82,13 +76,16 @@ class ClientIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         client_id = request.headers.get(CLIENT_ID_HEADER)
         remote_addr = request.client.host if request.client else None
+        trusted_local = request.scope.get(TRUSTED_LOCAL_REQUEST_SCOPE_KEY) is True
         client_token = current_client_id.set(client_id)
         addr_token = current_remote_addr.set(remote_addr)
+        local_token = current_request_is_trusted_local.set(trusted_local)
         try:
             response = await call_next(request)
         finally:
             current_client_id.reset(client_token)
             current_remote_addr.reset(addr_token)
+            current_request_is_trusted_local.reset(local_token)
 
         if client_id and _is_stamped_path(request.url.path):
             _enqueue_stamp(client_id)
@@ -104,13 +101,26 @@ def _enqueue_stamp(client_id: str) -> None:
     the response goes back to the caller.
     """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         # Middleware shouldn't run outside a loop, but if it ever does
         # (tests, weird wsgi shim), do the write inline rather than drop it.
         _stamp_last_seen(client_id)
         return
-    task = loop.create_task(asyncio.to_thread(_stamp_last_seen, client_id))
+    from ..backends.mlx_tts_lifecycle import run_blocking_operation_cancellation_safe
+    from ..services.task_queue import create_background_task
+
+    operation = run_blocking_operation_cancellation_safe(
+        _stamp_last_seen,
+        client_id,
+    )
+    try:
+        task = create_background_task(operation)
+    except RuntimeError:
+        # Shutdown has stopped accepting work. The response is already
+        # complete and a last-seen stamp is advisory, so dropping this write
+        # is safer than allowing it to outlive the data-root lock.
+        return
     _pending_stamps.add(task)
     task.add_done_callback(_pending_stamps.discard)
 
@@ -133,20 +143,14 @@ def _stamp_last_seen(client_id: str) -> None:
     except Exception:
         return
     try:
-        row = (
-            db.query(MCPClientBinding)
-            .filter(MCPClientBinding.client_id == client_id)
-            .first()
-        )
+        row = db.query(MCPClientBinding).filter(MCPClientBinding.client_id == client_id).first()
         if row is None:
             row = MCPClientBinding(client_id=client_id)
             db.add(row)
-        row.last_seen_at = datetime.now(timezone.utc)
+        row.last_seen_at = datetime.now(UTC)
         db.commit()
     except Exception:
-        logger.debug(
-            "Could not stamp last_seen_at for %s", client_id, exc_info=True
-        )
+        logger.debug("Could not stamp last_seen_at for %s", client_id, exc_info=True)
         db.rollback()
     finally:
         db.close()

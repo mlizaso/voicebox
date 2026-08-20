@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useEffect, useRef, useState } from 'react';
 import { CapturePill } from '@/components/CapturePill/CapturePill';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import type { FocusSnapshot } from '@/lib/api/types';
 import { useCaptureRecordingSession } from '@/lib/hooks/useCaptureRecordingSession';
@@ -131,7 +132,9 @@ export function DictateWindow() {
   };
 
   const startSpeakPlayback = (generationId: string) => {
-    const audio = new Audio(apiClient.getAudioUrl(generationId));
+    const audio = new Audio();
+    audio.crossOrigin = 'use-credentials';
+    audio.src = apiClient.getAudioUrl(generationId);
     audio.onended = () => dismissSpeak(generationId);
     audio.onerror = () => dismissSpeak(generationId);
     // The pill window stays hidden through the ~1 s generation wait so the
@@ -141,9 +144,7 @@ export function DictateWindow() {
     audio.onplaying = () => {
       emit('dictate:show').catch(() => {});
       setSpeaking((prev) =>
-        prev && prev.generationId === generationId
-          ? { ...prev, startedAt: Date.now() }
-          : prev,
+        prev && prev.generationId === generationId ? { ...prev, startedAt: Date.now() } : prev,
       );
       setSpeakElapsed(0);
     };
@@ -179,7 +180,7 @@ export function DictateWindow() {
 
         // Subscribe to this one generation's status. When it completes, the
         // `/audio/{id}` endpoint will serve the WAV we need to play.
-        const source = new EventSource(apiClient.getGenerationStatusUrl(id));
+        const source = authenticatedEventSource(apiClient.getGenerationStatusUrl(id));
         statusSourceRef.current = source;
         // Hard cap on how long the pill can sit in the 'speaking' state
         // without ever hearing back from the backend. Covers the case where

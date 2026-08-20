@@ -2,6 +2,7 @@ import { Loader2, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import type { ModelProgress as ModelProgressType } from '@/lib/api/types';
 import { useServerStore } from '@/stores/serverStore';
 
@@ -31,7 +32,7 @@ export function ModelProgress({
     console.log(`[ModelProgress] Connecting SSE for ${modelName}`);
 
     // Subscribe to progress updates via Server-Sent Events
-    const eventSource = new EventSource(`${serverUrl}/models/progress/${modelName}`);
+    const eventSource = authenticatedEventSource(`${serverUrl}/models/progress/${modelName}`);
 
     eventSource.onmessage = (event) => {
       try {

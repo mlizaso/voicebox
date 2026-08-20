@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from .. import config, models
-from ..services import history
+from .. import config
 from ..database import get_db
+from ..services import history
 
 router = APIRouter()
 
@@ -36,11 +36,14 @@ async def get_version_audio(version_id: str, db: Session = Depends(get_db)):
     audio_path = config.resolve_storage_path(version.audio_path)
     if audio_path is None or not audio_path.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
+    generation_id = version.generation_id
+    version_label = version.label
+    db.close()
 
     return FileResponse(
         audio_path,
         media_type=_audio_media_type(audio_path),
-        filename=f"generation_{version.generation_id}_{version.label}{audio_path.suffix}",
+        filename=f"generation_{generation_id}_{version_label}{audio_path.suffix}",
     )
 
 
@@ -53,12 +56,9 @@ async def get_audio(generation_id: str, db: Session = Depends(get_db)):
 
     audio_path = config.resolve_storage_path(generation.audio_path)
     if audio_path is None or not audio_path.is_file():
-        detail = (
-            "Generation failed; no audio available"
-            if generation.status == "failed"
-            else "Audio file not found"
-        )
+        detail = "Generation failed; no audio available" if generation.status == "failed" else "Audio file not found"
         raise HTTPException(status_code=404, detail=detail)
+    db.close()
 
     return FileResponse(
         audio_path,
@@ -79,6 +79,7 @@ async def get_sample_audio(sample_id: str, db: Session = Depends(get_db)):
     audio_path = config.resolve_storage_path(sample.audio_path)
     if audio_path is None or not audio_path.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
+    db.close()
 
     return FileResponse(
         audio_path,

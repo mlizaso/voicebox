@@ -13,8 +13,8 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import type { StoryItemDetail } from '@/lib/api/types';
 import { cn } from '@/lib/utils/cn';
-import { useStoryStore } from '@/stores/storyStore';
 import { useServerStore } from '@/stores/serverStore';
+import { useStoryStore } from '@/stores/storyStore';
 
 interface StoryChatItemProps {
   item: StoryItemDetail;
@@ -46,7 +46,9 @@ export function StoryChatItem({
 
   // Check if this item is currently playing based on timecode
   const itemStartMs = item.start_time_ms;
-  const itemEndMs = item.start_time_ms + item.duration * 1000;
+  const effectiveDurationMs =
+    item.duration * 1000 - (item.trim_start_ms || 0) - (item.trim_end_ms || 0);
+  const itemEndMs = item.start_time_ms + effectiveDurationMs;
   const isCurrentlyPlaying = isPlaying && currentTimeMs >= itemStartMs && currentTimeMs < itemEndMs;
 
   const handlePlay = () => {
@@ -169,7 +171,7 @@ export function SortableStoryChatItem(
   props: Omit<StoryChatItemProps, 'dragHandleProps' | 'isDragging'>,
 ) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: props.item.generation_id,
+    id: props.item.id,
   });
 
   const style = {

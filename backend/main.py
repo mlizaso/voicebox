@@ -5,10 +5,11 @@ entry point for development.
 """
 
 import argparse
+
 import uvicorn
 
+from . import config
 from .app import app  # noqa: F401 -- re-export for uvicorn "backend.main:app"
-from . import config, database
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="voicebox backend server")
@@ -16,7 +17,7 @@ if __name__ == "__main__":
         "--host",
         type=str,
         default="127.0.0.1",
-        help="Host to bind to (use 0.0.0.0 for remote access)",
+        help="Host to bind to (prefer loopback behind an HTTPS reverse proxy)",
     )
     parser.add_argument(
         "--port",
@@ -34,8 +35,6 @@ if __name__ == "__main__":
 
     if args.data_dir:
         config.set_data_dir(args.data_dir)
-
-    database.init_db()
 
     uvicorn.run(
         "backend.main:app",

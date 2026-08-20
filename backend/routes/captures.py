@@ -1,6 +1,7 @@
 """Capture (voice input) endpoints."""
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -10,15 +11,22 @@ from .. import config, models
 from ..backends import get_llm_model_configs, get_stt_model_configs
 from ..backends.base import is_model_cached
 from ..database import Capture as DBCapture, get_db
-from ..services import captures as captures_service
-from ..services import settings as settings_service
+from ..services import captures as captures_service, settings as settings_service
 from ..services.refinement import RefinementFlags
+from ..utils.upload_limits import (
+    AUDIO_UPLOAD_MAX_BYTES,
+    UploadDurationLimitError,
+    UploadSizeLimitError,
+    spool_upload_bounded,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
+CAPTURE_MAX_FILE_BYTES = AUDIO_UPLOAD_MAX_BYTES
+CAPTURE_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
 
 
 @router.post("/captures", response_model=models.CaptureCreateResponse)
@@ -30,41 +38,70 @@ async def create_capture_endpoint(
     db: Session = Depends(get_db),
 ):
     """Upload audio, run STT, persist the capture."""
-    chunks = []
-    while chunk := await file.read(UPLOAD_CHUNK_SIZE):
-        chunks.append(chunk)
-    audio_bytes = b"".join(chunks)
-
-    if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    saved = settings_service.get_capture_settings(db)
-    resolved_stt = stt_model or saved.stt_model
-    if language is None:
-        resolved_language = None if saved.language == "auto" else saved.language
-    else:
-        resolved_language = None if language == "auto" else language
-
+    upload_path = None
     try:
-        capture = await captures_service.create_capture(
-            audio_bytes=audio_bytes,
-            filename=file.filename or "capture.wav",
-            source=source,
-            language=resolved_language,
-            stt_model=resolved_stt,
-            db=db,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception("Failed to create capture")
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            uploaded_suffix = Path(file.filename or "").suffix.lower()
+            upload_path = await spool_upload_bounded(
+                file,
+                max_bytes=CAPTURE_MAX_FILE_BYTES,
+                suffix=(uploaded_suffix if uploaded_suffix in CAPTURE_AUDIO_EXTENSIONS else ".wav"),
+                chunk_bytes=UPLOAD_CHUNK_SIZE,
+            )
+        except UploadSizeLimitError as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=(f"Capture is too large (max {exc.max_bytes // (1024 * 1024)} MB)"),
+            ) from exc
 
-    return models.CaptureCreateResponse(
-        **capture.model_dump(),
-        auto_refine=bool(saved.auto_refine),
-        allow_auto_paste=bool(saved.allow_auto_paste),
-    )
+        if upload_path.stat().st_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        saved = settings_service.get_capture_settings(db)
+        resolved_stt = stt_model or saved.stt_model
+        if language is None:
+            resolved_language = None if saved.language == "auto" else saved.language
+        else:
+            resolved_language = None if language == "auto" else language
+
+        # The capture service does not need a DB connection until it publishes
+        # the final row. Release the settings read before STT waits on the
+        # process-wide inference guard.
+        db.close()
+
+        try:
+            capture = await captures_service.create_capture(
+                audio_bytes=upload_path,
+                filename=file.filename or "capture.wav",
+                source=source,
+                language=resolved_language,
+                stt_model=resolved_stt,
+                db=db,
+            )
+        except UploadSizeLimitError as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=(f"Capture is too large (max {exc.max_bytes // (1024 * 1024)} MB)"),
+            ) from exc
+        except UploadDurationLimitError as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=(f"Capture duration is too long (max {exc.max_seconds // 60} minutes)"),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Failed to create capture")
+            raise HTTPException(status_code=500, detail="Failed to create capture") from exc
+
+        return models.CaptureCreateResponse(
+            **capture.model_dump(),
+            auto_refine=bool(saved.auto_refine),
+            allow_auto_paste=bool(saved.allow_auto_paste),
+        )
+    finally:
+        if upload_path is not None:
+            upload_path.unlink(missing_ok=True)
 
 
 @router.get("/captures", response_model=models.CaptureListResponse)
@@ -100,6 +137,7 @@ async def get_capture_audio_endpoint(capture_id: str, db: Session = Depends(get_
     audio_path = config.resolve_storage_path(row.audio_path)
     if audio_path is None or not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
+    db.close()
 
     return FileResponse(
         audio_path,
@@ -137,6 +175,7 @@ async def refine_capture_endpoint(
         )
 
     resolved_model = request.model_size or saved.llm_model
+    db.close()
 
     try:
         capture = await captures_service.refine_capture(
@@ -145,9 +184,11 @@ async def refine_capture_endpoint(
             model_size=resolved_model,
             db=db,
         )
+    except captures_service.CaptureTranscriptChangedError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         logger.exception("Refinement failed for capture %s", capture_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to refine capture") from e
 
     if not capture:
         raise HTTPException(status_code=404, detail="Capture not found")
@@ -213,6 +254,8 @@ async def retranscribe_capture_endpoint(
     else:
         resolved_language = request.language
 
+    db.close()
+
     try:
         capture = await captures_service.retranscribe_capture(
             capture_id=capture_id,
@@ -221,10 +264,10 @@ async def retranscribe_capture_endpoint(
             db=db,
         )
     except FileNotFoundError as e:
-        raise HTTPException(status_code=410, detail=str(e))
+        raise HTTPException(status_code=410, detail=str(e)) from e
     except Exception as e:
         logger.exception("Retranscribe failed for capture %s", capture_id)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to retranscribe capture") from e
 
     if not capture:
         raise HTTPException(status_code=404, detail="Capture not found")

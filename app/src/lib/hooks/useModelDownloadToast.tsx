@@ -2,6 +2,7 @@ import { CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef } from 'react';
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/components/ui/use-toast';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import type { ModelProgress } from '@/lib/api/types';
 import { useServerStore } from '@/stores/serverStore';
 
@@ -71,7 +72,7 @@ export function useModelDownloadToast({
     // Subscribe to progress updates via Server-Sent Events
     const eventSourceUrl = `${serverUrl}/models/progress/${modelName}`;
     console.log('[useModelDownloadToast] Creating EventSource to:', eventSourceUrl);
-    const eventSource = new EventSource(eventSourceUrl);
+    const eventSource = authenticatedEventSource(eventSourceUrl);
 
     eventSource.onopen = () => {
       console.log('[useModelDownloadToast] EventSource connection opened for:', modelName);

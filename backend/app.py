@@ -8,6 +8,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import ClassVar
 
 from .utils.rocm_env import should_probe_rocminfo
 
@@ -15,7 +16,7 @@ from .utils.rocm_env import should_probe_rocminfo
 class ColoredFormatter(logging.Formatter):
     """Custom formatter to add colors matching uvicorn's style."""
 
-    COLORS = {
+    COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",  # Cyan
         "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
@@ -107,18 +108,28 @@ if not os.environ.get("MIOPEN_LOG_LEVEL"):
     os.environ["MIOPEN_LOG_LEVEL"] = "4"
 
 logger.info("Loading Voicebox dependencies; first startup can take up to a minute...")
+from urllib.parse import quote
+
 import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from urllib.parse import quote
 
 from . import __version__, config, database
-from .services import tts, transcribe, llm
+from .api_security import (
+    LocalAPISecurityMiddleware,
+    configured_browser_origins,
+)
 from .database import get_db
+from .request_limits import RequestBodyLimitMiddleware
+from .routes import register_routers
+from .services import llm, transcribe, tts
+from .services.task_queue import (
+    create_background_task,
+    init_queue,
+    shutdown_background_tasks,
+)
 from .utils.platform_detect import get_backend_type
 from .utils.progress import get_progress_manager
-from .services.task_queue import create_background_task, init_queue
-from .routes import register_routers
 
 
 def safe_content_disposition(disposition_type: str, filename: str) -> str:
@@ -134,8 +145,8 @@ def safe_content_disposition(disposition_type: str, filename: str) -> str:
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
-    from .mcp_server.server import build_mcp_server, compose_lifespan
     from .mcp_server.context import ClientIdMiddleware
+    from .mcp_server.server import build_mcp_server, compose_lifespan
 
     # Build the MCP app up-front so we can wire its lifespan into FastAPI's —
     # FastMCP's Streamable HTTP transport only works if its session manager
@@ -145,14 +156,14 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def voicebox_lifespan(app: FastAPI):
-        await _run_startup(app)
         try:
+            await _run_startup(app)
             yield
         finally:
             # Paired with _run_startup via try/finally: runs whether or
             # not the nested MCP lifespan entered cleanly, so a partial
             # startup still unloads whatever models were loaded.
-            await _run_shutdown()
+            await _run_shutdown(app)
 
     # compose_lifespan enters factories in order (voicebox startup →
     # MCP startup) and exits in LIFO (MCP teardown first → models
@@ -169,8 +180,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    _configure_cors(application)
     application.add_middleware(ClientIdMiddleware)
+    # This must sit outside Starlette's multipart parser. FastAPI applies user
+    # middleware in reverse add order: the security boundary stays outermost,
+    # then CORS can decorate size/admission failures for trusted browser origins.
+    application.add_middleware(RequestBodyLimitMiddleware)
+    _configure_cors(application)
+    application.add_middleware(LocalAPISecurityMiddleware)
     register_routers(application)
     application.mount("/mcp", mcp_app)
     logger.info("MCP: mounted at /mcp")
@@ -181,21 +197,9 @@ def create_app() -> FastAPI:
 
 def _configure_cors(application: FastAPI) -> None:
     """Set up CORS middleware with local-first defaults."""
-    default_origins = [
-        "http://localhost:5173",  # Vite dev server
-        "http://127.0.0.1:5173",
-        "http://localhost:17493",
-        "http://127.0.0.1:17493",
-        "tauri://localhost",  # Tauri webview (macOS)
-        "https://tauri.localhost",  # Tauri webview (Windows/Linux)
-        "http://tauri.localhost",  # Tauri webview (Windows, some builds)
-    ]
-    env_origins = os.environ.get("VOICEBOX_CORS_ORIGINS", "")
-    all_origins = default_origins + [o.strip() for o in env_origins.split(",") if o.strip()]
-
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=all_origins,
+        allow_origins=configured_browser_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -214,8 +218,8 @@ def _mount_frontend(application: FastAPI) -> None:
     if not frontend_dir.is_dir():
         return
 
-    from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
 
     # Mount hashed assets (JS, CSS, images) that Vite places under /assets
     assets_dir = frontend_dir / "assets"
@@ -255,9 +259,9 @@ def _get_gpu_status() -> str:
         if not compatible:
             label += " [UNSUPPORTED - see logs]"
         return label
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "MPS (Apple Silicon)"
-    elif backend_type == "mlx":
+    if backend_type == "mlx":
         return "Metal (Apple Silicon via MLX)"
 
     # Intel XPU (Arc / Data Center) via IPEX
@@ -276,6 +280,198 @@ def _get_gpu_status() -> str:
     return "None (CPU only)"
 
 
+def _recover_managed_storage(db) -> None:
+    """Reconcile valid publication intents before the queue accepts work."""
+    from .services.deletion_journal import recover_interrupted_deletions
+
+    try:
+        recovery = recover_interrupted_deletions(db)
+    except Exception as exc:
+        raise RuntimeError("Managed-storage crash recovery failed; refusing startup") from exc
+
+    if recovery.restored or recovery.discarded or recovery.cleared or recovery.unresolved or recovery.malformed:
+        logger.info(
+            "Deletion recovery: %d restored, %d discarded, %d cleared, %d unresolved, %d malformed",
+            recovery.restored,
+            recovery.discarded,
+            recovery.cleared,
+            recovery.unresolved,
+            recovery.malformed,
+        )
+    if recovery.malformed:
+        # Malformed entries carry no trustworthy path or inode identity, so
+        # they cannot be acted upon. Keep them for manual inspection without
+        # letting an invalid file alone become a startup-denial primitive.
+        logger.error(
+            "Retained %d malformed deletion journal entr%s for manual inspection",
+            recovery.malformed,
+            "y" if recovery.malformed == 1 else "ies",
+        )
+    if recovery.unresolved:
+        raise RuntimeError("Managed-storage crash recovery is unresolved; refusing startup")
+
+
+def _reconcile_stale_generations(db) -> None:
+    """Make killed in-flight rows terminal before accepting new work."""
+    from sqlalchemy import text as sa_text
+
+    try:
+        result = db.execute(
+            sa_text(
+                "UPDATE generations SET status = 'failed', "
+                "error = 'Server was shut down during generation' "
+                "WHERE status IN ('generating', 'loading_model')"
+            )
+        )
+        if result.rowcount > 0:
+            logger.info("Marked %d stale generation(s) as failed", result.rowcount)
+
+        from .database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile
+
+        profile_count = db.query(DBVoiceProfile).count()
+        generation_count = db.query(DBGeneration).count()
+        logger.info("Profiles: %d, Generations: %d", profile_count, generation_count)
+        db.commit()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception as rollback_exc:
+            raise RuntimeError("Stale-generation reconciliation rollback failed; refusing startup") from rollback_exc
+        raise RuntimeError("Stale-generation reconciliation failed; refusing startup") from exc
+
+
+def _prune_abandoned_exact_checkpoints(db) -> None:
+    """Boundedly reclaim safe checkpoint garbage before workers start."""
+    try:
+        from .services.exact_chunk_checkpoints import (
+            ExactChunkCheckpointStore,
+            garbage_collect_exact_chunk_checkpoints,
+        )
+
+        store = ExactChunkCheckpointStore()
+    except Exception:
+        logger.warning("Could not initialize exact checkpoint cleanup", exc_info=True)
+        return
+
+    try:
+        removed = store.prune_abandoned_temporary_files()
+    except Exception:
+        # Final checkpoints remain independently validated and quota-bound.
+        # Optional cache cleanup must not prevent unrelated engines starting.
+        logger.warning("Could not prune abandoned exact checkpoint temp files", exc_info=True)
+    else:
+        if removed:
+            logger.info("Removed %d abandoned exact checkpoint temp file(s)", removed)
+
+    try:
+        report = garbage_collect_exact_chunk_checkpoints(db, store=store)
+    except Exception:
+        # Ownership uncertainty always retains final checkpoints. The hard
+        # byte quota still prevents this optional cleanup failure from
+        # exhausting the rest of the data volume.
+        logger.warning("Could not garbage-collect exact chunk checkpoints", exc_info=True)
+        return
+    if report.removed:
+        logger.info(
+            "Reclaimed %d completed or orphaned exact checkpoint request(s)",
+            report.removed,
+        )
+    if report.refused:
+        logger.warning(
+            "Refused %d unsafe exact checkpoint request %s",
+            report.refused,
+            "directory" if report.refused == 1 else "directories",
+        )
+
+
+def _prune_abandoned_exact_voice_snapshots(db) -> None:
+    """Reclaim only ownership-proven snapshot garbage before routes start."""
+    try:
+        from .services.profiles import garbage_collect_exact_voice_snapshots
+
+        report = garbage_collect_exact_voice_snapshots(db)
+    except Exception:
+        # Ownership uncertainty retains every finalized directory. Hard write
+        # quotas remain active even if optional startup reclamation cannot run.
+        logger.warning("Could not garbage-collect exact voice snapshots", exc_info=True)
+        return
+    if report.pending_removed:
+        logger.info(
+            "Removed %d abandoned exact voice snapshot director%s",
+            report.pending_removed,
+            "y" if report.pending_removed == 1 else "ies",
+        )
+    if report.finalized_removed:
+        logger.info(
+            "Reclaimed %d completed or orphaned exact voice snapshot%s",
+            report.finalized_removed,
+            "" if report.finalized_removed == 1 else "s",
+        )
+    if report.refused:
+        logger.warning(
+            "Refused %d unsafe exact voice snapshot entr%s",
+            report.refused,
+            "y" if report.refused == 1 else "ies",
+        )
+
+
+def _prune_abandoned_story_audio_exports() -> None:
+    """Remove response scratch left by a killed Story export process."""
+    try:
+        from .services.stories import cleanup_abandoned_story_audio_exports
+
+        removed, refused, truncated = cleanup_abandoned_story_audio_exports()
+    except Exception:
+        # New exports still preflight free space and repeat this cleanup before
+        # allocating. Optional cache reclamation must not block all engines.
+        logger.warning("Could not clean abandoned Story audio exports", exc_info=True)
+        return
+    if removed:
+        logger.info("Removed %d abandoned Story audio export(s)", removed)
+    if refused or truncated:
+        logger.warning(
+            "Retained unsafe or excess Story export scratch (refused=%d, truncated=%s)",
+            refused,
+            truncated,
+        )
+
+
+def _prune_abandoned_effects_processing() -> None:
+    """Remove preview/decoder scratch left by a killed effects request."""
+    try:
+        from .services.effects_processing import cleanup_abandoned_effects_processing
+
+        removed, refused, truncated = cleanup_abandoned_effects_processing()
+    except Exception:
+        # New requests repeat bounded cleanup and capacity admission. Optional
+        # cache reclamation must not prevent unrelated engines from starting.
+        logger.warning("Could not clean abandoned effects processing scratch", exc_info=True)
+        return
+    if removed:
+        logger.info("Removed %d abandoned effects processing director%s", removed, "y" if removed == 1 else "ies")
+    if refused or truncated:
+        logger.warning(
+            "Retained unsafe or excess effects scratch (refused=%d, truncated=%s)",
+            refused,
+            truncated,
+        )
+
+
+def _prune_voice_prompt_cache() -> None:
+    """Bound retained voice-conditioning prompts before requests start."""
+    try:
+        from .utils.cache import prune_voice_prompt_cache
+
+        removed = prune_voice_prompt_cache()
+    except Exception:
+        # New writes remain hard bounded even if optional startup reclamation
+        # cannot inspect an unsafe entry or a temporarily unavailable volume.
+        logger.warning("Could not prune the bounded voice-prompt cache", exc_info=True)
+        return
+    if removed:
+        logger.info("Reclaimed %d stale voice-prompt cache entr%s", removed, "y" if removed == 1 else "ies")
+
+
 async def _run_startup(application: FastAPI) -> None:
     """Database init, warnings, model-cache prep. Runs on lifespan entry."""
     import platform
@@ -290,42 +486,41 @@ async def _run_startup(application: FastAPI) -> None:
         platform.machine(),
     )
 
-    database.init_db()
+    # Permission initialization creates/validates the lexical root without
+    # touching SQLite. The lifetime lock then serializes migrations, recovery,
+    # deletion staging, and all subsequent writes across backend processes.
+    config.initialize_data_permissions()
+    from .data_root_lock import acquire_data_root_lock
+
+    data_root_lock = acquire_data_root_lock()
+    application.state.data_root_lock = data_root_lock
+    try:
+        database.init_db()
+    except BaseException:
+        data_root_lock.release()
+        del application.state.data_root_lock
+        raise
 
     from .database.session import _db_path
 
     logger.info("Database: %s", _db_path)
     logger.info("Data directory: %s", config.get_data_dir())
 
-    init_queue()
-
-    # Mark stale "generating" records as failed -- leftovers from a killed process
-    from sqlalchemy import text as sa_text
-
     db = next(get_db())
     try:
-        result = db.execute(
-            sa_text(
-                "UPDATE generations SET status = 'failed', "
-                "error = 'Server was shut down during generation' "
-                "WHERE status IN ('generating', 'loading_model')"
-            )
-        )
-        if result.rowcount > 0:
-            logger.info("Marked %d stale generation(s) as failed", result.rowcount)
-
-        from .database import VoiceProfile as DBVoiceProfile, Generation as DBGeneration
-
-        profile_count = db.query(DBVoiceProfile).count()
-        generation_count = db.query(DBGeneration).count()
-        logger.info("Profiles: %d, Generations: %d", profile_count, generation_count)
-
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        logger.warning("Could not clean up stale generations: %s", e)
+        _recover_managed_storage(db)
+        _reconcile_stale_generations(db)
+        _prune_abandoned_exact_checkpoints(db)
+        _prune_abandoned_exact_voice_snapshots(db)
+        _prune_abandoned_story_audio_exports()
+        _prune_abandoned_effects_processing()
+        _prune_voice_prompt_cache()
     finally:
         db.close()
+
+    # The queue must not accept new work until filesystem/DB deletion recovery
+    # and stale-generation reconciliation have completed.
+    init_queue()
 
     backend_type = get_backend_type()
     logger.info("Backend: %s", backend_type.upper())
@@ -337,8 +532,11 @@ async def _run_startup(application: FastAPI) -> None:
     if not _compatible:
         logger.warning("GPU COMPATIBILITY: %s", _cuda_warning)
 
-    from .services.cuda import check_and_update_cuda_binary
-    from .services.rocm import check_and_update_rocm_binary
+    from .services.cuda import check_and_update_cuda_binary, recover_cuda_backend_install
+    from .services.rocm import check_and_update_rocm_binary, recover_rocm_backend_install
+
+    await recover_cuda_backend_install()
+    await recover_rocm_backend_install()
 
     create_background_task(check_and_update_cuda_binary())
     create_background_task(check_and_update_rocm_binary())
@@ -361,21 +559,31 @@ async def _run_startup(application: FastAPI) -> None:
     logger.info("Ready")
 
 
-async def _run_shutdown() -> None:
+async def _run_shutdown(application: FastAPI | None = None) -> None:
     """Unload models on lifespan exit."""
     logger.info("Voicebox server shutting down...")
+    # If draining ever fails unexpectedly, retain the process lock. Releasing
+    # it while a writer may still be alive is less safe than letting process
+    # teardown close the descriptor.
+    await shutdown_background_tasks()
     try:
-        tts.unload_tts_model()
-    except Exception:
-        logger.exception("Failed to unload TTS model")
-    try:
-        transcribe.unload_whisper_model()
-    except Exception:
-        logger.exception("Failed to unload Whisper model")
-    try:
-        llm.unload_llm_model()
-    except Exception:
-        logger.exception("Failed to unload LLM model")
+        try:
+            tts.unload_tts_model()
+        except Exception:
+            logger.exception("Failed to unload TTS model")
+        try:
+            transcribe.unload_whisper_model()
+        except Exception:
+            logger.exception("Failed to unload Whisper model")
+        try:
+            llm.unload_llm_model()
+        except Exception:
+            logger.exception("Failed to unload LLM model")
+    finally:
+        data_root_lock = getattr(application.state, "data_root_lock", None) if application is not None else None
+        if data_root_lock is not None:
+            data_root_lock.release()
+            del application.state.data_root_lock
 
 
 app = create_app()

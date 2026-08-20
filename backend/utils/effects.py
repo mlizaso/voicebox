@@ -19,24 +19,27 @@ Supported effect types:
 
 from __future__ import annotations
 
-import numpy as np
-from typing import Any, Dict, List, Optional
+import math
+from typing import Any
 
+import numpy as np
 from pedalboard import (
-    Pedalboard,
     Chorus,
-    Reverb,
     Compressor,
+    Delay,
     Gain,
     HighpassFilter,
     LowpassFilter,
-    Delay,
+    Pedalboard,
     PitchShift,
+    Reverb,
 )
+
+MAX_EFFECTS_CHAIN_LENGTH = 32
 
 
 # Each param definition: (default, min, max, description)
-EFFECT_REGISTRY: Dict[str, Dict[str, Any]] = {
+EFFECT_REGISTRY: dict[str, dict[str, Any]] = {
     "chorus": {
         "cls": Chorus,
         "label": "Chorus / Flanger",
@@ -147,7 +150,7 @@ EFFECT_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
-BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
+BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
     "robotic": {
         "name": "Robotic",
         "sort_order": 0,
@@ -255,7 +258,7 @@ BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_available_effects() -> List[Dict[str, Any]]:
+def get_available_effects() -> list[dict[str, Any]]:
     """Return the list of available effect types with their parameter definitions.
 
     Used by the frontend to build the effects chain editor UI.
@@ -273,26 +276,30 @@ def get_available_effects() -> List[Dict[str, Any]]:
     return result
 
 
-def get_builtin_presets() -> Dict[str, Dict[str, Any]]:
+def get_builtin_presets() -> dict[str, dict[str, Any]]:
     """Return all built-in effect presets."""
     return BUILTIN_PRESETS
 
 
-def validate_effects_chain(effects_chain: List[Dict[str, Any]]) -> Optional[str]:
+def validate_effects_chain(effects_chain: list[dict[str, Any]]) -> str | None:
     """Validate an effects chain configuration.
 
     Returns None if valid, or an error message string.
     """
     if not isinstance(effects_chain, list):
         return "effects_chain must be a list"
+    if len(effects_chain) > MAX_EFFECTS_CHAIN_LENGTH:
+        return f"effects_chain may contain at most {MAX_EFFECTS_CHAIN_LENGTH} effects"
 
     for i, effect in enumerate(effects_chain):
         if not isinstance(effect, dict):
             return f"Effect at index {i} must be a dict"
 
         effect_type = effect.get("type")
-        if effect_type not in EFFECT_REGISTRY:
+        if not isinstance(effect_type, str) or effect_type not in EFFECT_REGISTRY:
             return f"Unknown effect type '{effect_type}' at index {i}. Available: {list(EFFECT_REGISTRY.keys())}"
+        if not isinstance(effect.get("enabled", True), bool):
+            return f"Effect '{effect_type}' at index {i}: enabled must be a boolean"
 
         params = effect.get("params", {})
         if not isinstance(params, dict):
@@ -304,8 +311,10 @@ def validate_effects_chain(effects_chain: List[Dict[str, Any]]) -> Optional[str]
                 return f"Effect '{effect_type}' at index {i}: unknown param '{param_name}'"
 
             pdef = registry["params"][param_name]
-            if not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return f"Effect '{effect_type}' at index {i}: param '{param_name}' must be a number"
+            if not math.isfinite(float(value)):
+                return f"Effect '{effect_type}' at index {i}: param '{param_name}' must be finite"
             if value < pdef["min"] or value > pdef["max"]:
                 return (
                     f"Effect '{effect_type}' at index {i}: param '{param_name}' "
@@ -315,7 +324,7 @@ def validate_effects_chain(effects_chain: List[Dict[str, Any]]) -> Optional[str]
     return None
 
 
-def build_pedalboard(effects_chain: List[Dict[str, Any]]) -> Pedalboard:
+def build_pedalboard(effects_chain: list[dict[str, Any]]) -> Pedalboard:
     """Build a Pedalboard instance from an effects chain config.
 
     Skips effects where ``enabled`` is ``False``.
@@ -342,7 +351,7 @@ def build_pedalboard(effects_chain: List[Dict[str, Any]]) -> Pedalboard:
 def apply_effects(
     audio: np.ndarray,
     sample_rate: int,
-    effects_chain: List[Dict[str, Any]],
+    effects_chain: list[dict[str, Any]],
 ) -> np.ndarray:
     """Apply an effects chain to audio data.
 

@@ -4,6 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
+import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import { formatAudioDuration } from '@/lib/utils/audio';
 import { debug } from '@/lib/utils/debug';
@@ -126,6 +127,7 @@ export function AudioPlayer() {
           dragToSeek: { debounceTime: 0 },
           mediaControls: false,
           backend: 'WebAudio',
+          fetchParams: { credentials: 'include' },
         });
 
         // Wire up event handlers (these persist for the lifetime of the instance)
@@ -441,7 +443,7 @@ export function AudioPlayer() {
 
         if (deviceIds.length > 0) {
           // Fetch audio data
-          const response = await fetch(audioUrl);
+          const response = await authenticatedFetch(audioUrl);
           const audioData = new Uint8Array(await response.arrayBuffer());
 
           // Play via native audio

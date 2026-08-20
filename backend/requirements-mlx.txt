@@ -5,11 +5,23 @@
 # mlx pins the matching mlx-metal distribution on macOS.
 mlx==0.32.0
 
+# Exact Qwen audiobook runtime overrides.  This file is installed after the
+# cross-platform base requirements so the resumable MLX path is numerically
+# frozen without constraining Python/PyTorch-only installations.
+numpy==1.26.4
+librosa==0.11.0
+soundfile==0.14.0
+soxr==1.1.0
+# The exact API can apply a profile effects chain to its default artifact.
+pedalboard==0.9.24
+transformers==4.57.3
+tokenizers==0.22.2
+
 # miniaudio is a runtime dep of mlx-audio's STT path (mlx_audio.stt).
 # mlx-audio itself is installed --no-deps (see comment below), so we
 # must list miniaudio explicitly here or transcription fails on fresh
 # M1 installs with `ModuleNotFoundError: miniaudio` (issue #505).
-miniaudio>=1.59
+miniaudio==1.71
 
 # NOTE: mlx-audio is intentionally not listed here. From 0.3.1 onward it
 # declares `transformers==5.0.0rc3` / `>=5.0.0`, which conflicts with the

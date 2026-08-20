@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import type { CudaDownloadProgress, RocmDownloadProgress } from '@/lib/api/types';
 import { useServerHealth } from '@/lib/hooks/useServer';
@@ -76,7 +77,7 @@ export function GpuAcceleration() {
       return;
     }
 
-    const eventSource = new EventSource(`${serverUrl}/backend/cuda-progress`);
+    const eventSource = authenticatedEventSource(`${serverUrl}/backend/cuda-progress`);
 
     eventSource.onmessage = (event) => {
       try {
@@ -113,7 +114,7 @@ export function GpuAcceleration() {
       return;
     }
 
-    const eventSource = new EventSource(`${serverUrl}/backend/rocm-progress`);
+    const eventSource = authenticatedEventSource(`${serverUrl}/backend/rocm-progress`);
 
     eventSource.onmessage = (event) => {
       try {

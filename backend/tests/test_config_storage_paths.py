@@ -34,5 +34,8 @@ def test_absolute_legacy_data_path_still_rebases_to_current_root(tmp_path: Path)
         resolved = config.resolve_storage_path("/retired/voicebox/data/profiles/profile-id/sample.wav")
 
         assert resolved == custom_root / "profiles" / "profile-id" / "sample.wav"
+        assert config.managed_storage_relative_path(
+            "/retired/voicebox/data/profiles/profile-id/sample.wav"
+        ) == Path("profiles/profile-id/sample.wav")
     finally:
         config.set_data_dir(original)

@@ -16,7 +16,10 @@ Preferred — direct HTTP:
   "mcpServers": {
     "voicebox": {
       "url": "http://127.0.0.1:17493/mcp",
-      "headers": { "X-Voicebox-Client-Id": "claude-code" }
+      "headers": {
+        "X-Voicebox-Client-Id": "claude-code",
+        "Authorization": "Bearer <VOICEBOX_REMOTE_API_TOKEN>"
+      }
     }
   }
 }
@@ -30,7 +33,13 @@ Fallback — stdio shim (when the client doesn't speak HTTP MCP). The
   "mcpServers": {
     "voicebox": {
       "command": "/Applications/Voicebox.app/Contents/MacOS/voicebox-mcp",
-      "env": { "VOICEBOX_CLIENT_ID": "claude-code" }
+      "env": {
+        "VOICEBOX_CLIENT_ID": "claude-code",
+        "VOICEBOX_HOST": "voicebox.example",
+        "VOICEBOX_SCHEME": "https",
+        "VOICEBOX_PORT": "443",
+        "VOICEBOX_REMOTE_API_TOKEN": "<server token>"
+      }
     }
   }
 }
@@ -62,6 +71,20 @@ All tools resolve voice profiles in this precedence:
 
 Bindings are managed via `GET|PUT /mcp/bindings` or in the app under
 Settings → MCP.
+
+The Authorization entry is required whenever either the MCP client's network
+peer or requested Host is not local. Keep it out for the default direct local
+setup; never put the token in a URL. The stdio shim reads the token from its
+environment and applies it to both health checks and MCP requests. It refuses
+to send a remote token over plain HTTP by default; set `VOICEBOX_SCHEME=https`.
+The server's
+`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1` escape hatch is intentionally unsafe
+and should not be used as a replacement for TLS.
+
+`voicebox.transcribe(audio_path=...)` can read a server-local path only when
+both the direct network peer and requested Host are local. Authenticated calls
+through a same-host reverse proxy are still remote and must upload
+`audio_base64`; bearer authentication never grants filesystem-path access.
 
 ## Debug with MCP Inspector
 

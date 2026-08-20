@@ -7,7 +7,9 @@ server's response back. The Voicebox server does all the real work.
 Environment variables:
   VOICEBOX_PORT       Voicebox server port (default 17493).
   VOICEBOX_HOST       Host (default 127.0.0.1).
+  VOICEBOX_SCHEME     http for loopback (default), https for remote servers.
   VOICEBOX_CLIENT_ID  Forwarded as X-Voicebox-Client-Id on every request.
+  VOICEBOX_REMOTE_API_TOKEN  Bearer capability for a non-loopback server.
 
 Stdout is JSON-RPC only. Diagnostics go to stderr.
 Exit 0 on clean EOF, 1 on transport error, 2 if backend never answers.
@@ -16,13 +18,13 @@ Exit 0 on clean EOF, 1 on transport error, 2 if backend never answers.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import sys
 from typing import Any
 
 import httpx
-
 
 CLIENT_ID_HEADER = "X-Voicebox-Client-Id"
 SESSION_HEADER = "mcp-session-id"
@@ -36,8 +38,35 @@ def _err(msg: str) -> None:
 
 def _base_url() -> tuple[str, str]:
     host = os.environ.get("VOICEBOX_HOST", "127.0.0.1")
+    if not host or any(character.isspace() or character in "/?#@" for character in host):
+        raise ValueError("VOICEBOX_HOST must contain only a hostname or IP address")
+    scheme = os.environ.get("VOICEBOX_SCHEME", "http").lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("VOICEBOX_SCHEME must be either http or https")
     port = int(os.environ.get("VOICEBOX_PORT", str(DEFAULT_PORT)))
-    return f"http://{host}:{port}/mcp/", f"http://{host}:{port}/health"
+    if not 1 <= port <= 65535:
+        raise ValueError("VOICEBOX_PORT must be between 1 and 65535")
+
+    normalized_host = host.removeprefix("[").removesuffix("]")
+    try:
+        address = ipaddress.ip_address(normalized_host)
+        loopback = address.is_loopback
+    except ValueError:
+        if ":" in normalized_host:
+            raise ValueError("VOICEBOX_HOST contains an invalid IP address") from None
+        loopback = normalized_host.rstrip(".").lower() in {"localhost", "tauri.localhost"}
+    remote_api_token = os.environ.get("VOICEBOX_REMOTE_API_TOKEN")
+    if (
+        remote_api_token
+        and scheme != "https"
+        and not loopback
+        and os.environ.get("VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP") != "1"
+    ):
+        raise ValueError("refusing to send VOICEBOX_REMOTE_API_TOKEN over plaintext HTTP; set VOICEBOX_SCHEME=https")
+
+    authority_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    base = f"{scheme}://{authority_host}:{port}"
+    return f"{base}/mcp/", f"{base}/health"
 
 
 async def _wait_for_backend(client: httpx.AsyncClient, health_url: str) -> bool:
@@ -96,9 +125,7 @@ async def _handle_request(
     # 202 Accepted and we stay quiet.
     is_notification = isinstance(message, dict) and "id" not in message
 
-    async with client.stream(
-        "POST", url, headers=req_headers, content=raw.encode("utf-8")
-    ) as response:
+    async with client.stream("POST", url, headers=req_headers, content=raw.encode("utf-8")) as response:
         # Capture session id on initialize.
         if session_id[0] is None:
             sid = response.headers.get(SESSION_HEADER)
@@ -109,10 +136,7 @@ async def _handle_request(
             return  # notification acknowledged
         if response.status_code >= 400:
             body = await response.aread()
-            _err(
-                f"server {response.status_code}: "
-                f"{body.decode('utf-8', errors='replace')[:400]}"
-            )
+            _err(f"server {response.status_code}: {body.decode('utf-8', errors='replace')[:400]}")
             if is_notification:
                 return
             _write_stdout(
@@ -121,9 +145,7 @@ async def _handle_request(
                     "id": message.get("id"),
                     "error": {
                         "code": -32000,
-                        "message": (
-                            f"Voicebox MCP proxy got HTTP {response.status_code}"
-                        ),
+                        "message": (f"Voicebox MCP proxy got HTTP {response.status_code}"),
                     },
                 }
             )
@@ -146,10 +168,7 @@ async def _handle_request(
             try:
                 _write_stdout(json.loads(body))
             except json.JSONDecodeError:
-                _err(
-                    f"non-JSON response ({ctype}): "
-                    f"{body.decode('utf-8', errors='replace')[:200]}"
-                )
+                _err(f"non-JSON response ({ctype}): {body.decode('utf-8', errors='replace')[:200]}")
 
 
 async def _run() -> int:
@@ -158,14 +177,18 @@ async def _run() -> int:
     client_id = os.environ.get("VOICEBOX_CLIENT_ID")
     if client_id:
         forward_headers[CLIENT_ID_HEADER] = client_id
+    remote_api_token = os.environ.get("VOICEBOX_REMOTE_API_TOKEN")
+    if remote_api_token:
+        forward_headers["Authorization"] = f"Bearer {remote_api_token}"
 
     session_id: list[str | None] = [None]
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(300.0),
+        headers=forward_headers,
+    ) as client:
         if not await _wait_for_backend(client, health_url):
-            _err(
-                f"timed out waiting for Voicebox at {health_url} — is the app open?"
-            )
+            _err(f"timed out waiting for Voicebox at {health_url} — is the app open?")
             return 2
 
         try:
@@ -176,9 +199,7 @@ async def _run() -> int:
                 line = line.strip()
                 if not line:
                     continue
-                await _handle_request(
-                    client, url, line, forward_headers, session_id
-                )
+                await _handle_request(client, url, line, forward_headers, session_id)
         except (KeyboardInterrupt, SystemExit):
             return 0
         except Exception as exc:
@@ -191,6 +212,9 @@ def main() -> int:
         return asyncio.run(_run())
     except KeyboardInterrupt:
         return 0
+    except ValueError as exc:
+        _err(f"invalid configuration: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

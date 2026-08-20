@@ -1,9 +1,20 @@
 """ORM model definitions for the voicebox SQLite database."""
 
-from datetime import datetime
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Column, String, Integer, Float, DateTime, Text, ForeignKey, Boolean, JSON
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.ext.declarative import declarative_base
 
 from ..utils.capture_chords import (
@@ -34,10 +45,10 @@ class VoiceProfile(Base):
 
     # Voice type system — added v0.3.x
     voice_type = Column(String, default="cloned")  # "cloned" | "preset" | "designed"
-    preset_engine = Column(String, nullable=True)   # e.g. "kokoro" — only for preset
+    preset_engine = Column(String, nullable=True)  # e.g. "kokoro" — only for preset
     preset_voice_id = Column(String, nullable=True)  # e.g. "am_adam" — only for preset
-    design_prompt = Column(Text, nullable=True)      # text description — only for designed
-    default_engine = Column(String, nullable=True)   # auto-selected engine, locked for preset
+    design_prompt = Column(Text, nullable=True)  # text description — only for designed
+    default_engine = Column(String, nullable=True)  # auto-selected engine, locked for preset
     # Free-form character prompt used by the compose button and the
     # personality-rewrite path on /generate. Describes *what* this voice
     # says and how, orthogonal to how it sounds (handled by the preset /
@@ -52,9 +63,20 @@ class ProfileSample(Base):
     """Audio sample attached to a voice profile."""
 
     __tablename__ = "profile_samples"
+    __table_args__ = (
+        Index(
+            "uq_profile_samples_profile_ordinal",
+            "profile_id",
+            "ordinal",
+            unique=True,
+        ),
+    )
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     profile_id = Column(String, ForeignKey("profiles.id"), nullable=False)
+    # Immutable per-profile sequence. Unlike the runtime UUID, this survives
+    # snapshot re-imports and makes multi-sample conditioning deterministic.
+    ordinal = Column(Integer, nullable=False, default=0, server_default="0")
     audio_path = Column(String, nullable=False)
     reference_text = Column(Text, nullable=False)
 
@@ -82,6 +104,23 @@ class Generation(Base):
     # profile's personality LLM before TTS. Future sources (bulk import,
     # agent replies, etc.) can extend this.
     source = Column(String, nullable=False, default="manual")
+    # Canonical hash of the full exact-generation request. Caller-supplied
+    # deterministic IDs are idempotent only when this contract still matches.
+    exact_request_sha256 = Column(String, nullable=True)
+    # Canonical identity of the execution envelope: serial singleton versus
+    # ordered model batch, caller IDs, row indexes, and each exact request hash.
+    # This prevents a row from being reattached under a different numerical
+    # batching context even when its own text/seed contract is unchanged.
+    exact_envelope_sha256 = Column(String, nullable=True)
+    # Canonical JSON of the effective effects chain resolved when the exact
+    # request was accepted. Profile defaults may change while work is queued.
+    exact_effects_json = Column(Text, nullable=True)
+    # Durable descriptor for raw immutable reference bytes published before an
+    # exact row is accepted into the queue.
+    exact_voice_snapshot_json = Column(Text, nullable=True)
+    # Server-computed binding of ordered sample ordinals, full transcripts, and
+    # processed reference-audio bytes. Exact workers fail if it changes while queued.
+    voice_binding_sha256 = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -212,12 +251,8 @@ class CaptureSettings(Base):
     hotkey_enabled = Column(Boolean, nullable=False, default=False)
     # Lists of keytap key names (e.g. "MetaRight", "ControlRight"). Right-hand
     # modifiers by default so they don't collide with left-hand shortcuts.
-    chord_push_to_talk_keys = Column(
-        JSON, nullable=False, default=default_push_to_talk_chord
-    )
-    chord_toggle_to_talk_keys = Column(
-        JSON, nullable=False, default=default_toggle_to_talk_chord
-    )
+    chord_push_to_talk_keys = Column(JSON, nullable=False, default=default_push_to_talk_chord)
+    chord_toggle_to_talk_keys = Column(JSON, nullable=False, default=default_toggle_to_talk_chord)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

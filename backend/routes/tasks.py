@@ -2,31 +2,36 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from .. import models
 from ..utils.cache import clear_voice_prompt_cache
 from ..utils.progress import get_progress_manager
 from ..utils.tasks import get_task_manager
-from fastapi import HTTPException
 
 router = APIRouter()
 
 
 @router.post("/tasks/clear")
 async def clear_all_tasks():
-    """Clear all download tasks and progress state."""
+    """Clear terminal download metadata without hiding live work."""
+    from .models import clear_task_metadata_if_no_owned_model_tasks
+
     task_manager = get_task_manager()
     progress_manager = get_progress_manager()
 
-    task_manager.clear_all()
+    active_operations = clear_task_metadata_if_no_owned_model_tasks(
+        task_manager,
+        progress_manager,
+    )
+    if active_operations:
+        names = ", ".join(active_operations)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot clear tasks while model operations are active: {names}",
+        )
 
-    with progress_manager._lock:
-        progress_manager._progress.clear()
-        progress_manager._last_notify_time.clear()
-        progress_manager._last_notify_progress.clear()
-
-    return {"message": "All task state cleared"}
+    return {"message": "All download task state cleared"}
 
 
 @router.post("/cache/clear")
@@ -39,7 +44,7 @@ async def clear_cache():
             "files_deleted": deleted_count,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {e!s}") from e
 
 
 @router.get("/tasks/active", response_model=models.ActiveTasksResponse)

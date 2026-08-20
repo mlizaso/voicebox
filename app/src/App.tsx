@@ -167,10 +167,11 @@ function MainApp() {
     serverStartingRef.current = true;
     const isRemote = useServerStore.getState().mode === 'remote';
     const customModelsDir = useServerStore.getState().customModelsDir;
+    const remoteApiToken = useServerStore.getState().remoteApiToken;
     console.log(`Production mode: Starting bundled server... (remote: ${isRemote})`);
 
     platform.lifecycle
-      .startServer(isRemote, customModelsDir)
+      .startServer(isRemote, customModelsDir, remoteApiToken || null)
       .then((serverUrl) => {
         console.log('Server is ready at:', serverUrl);
         // Update the server URL in the store with the dynamically assigned port

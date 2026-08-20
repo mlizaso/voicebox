@@ -204,6 +204,8 @@ struct ServerState {
     server_pid: Mutex<Option<u32>>,
     keep_running_on_close: Mutex<bool>,
     models_dir: Mutex<Option<String>>,
+    remote_mode: Mutex<bool>,
+    remote_api_token: Mutex<Option<String>>,
     /// Override the backend selection: Some("cpu") forces the CPU sidecar even
     /// when GPU binaries exist (solving the Windows catch-22 where an active
     /// .exe cannot be deleted), while Some("cuda")/Some("rocm") pin a specific
@@ -211,6 +213,33 @@ struct ServerState {
     /// default (ROCm preferred, then CUDA). Persisted to disk so the choice
     /// survives an app restart.
     backend_override: Mutex<Option<String>>,
+}
+
+fn validate_remote_api_token(token: &str) -> Result<(), String> {
+    if token.len() < 32 || token.len() > 512 {
+        return Err("Remote API token must be between 32 and 512 characters".to_string());
+    }
+    if !token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err("Remote API token must use URL-safe ASCII characters".to_string());
+    }
+    Ok(())
+}
+
+fn insecure_remote_http_allowed() -> Result<bool, String> {
+    match std::env::var("VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP") {
+        Ok(value) if value.is_empty() || value == "0" => Ok(false),
+        Ok(value) if value == "1" => Ok(true),
+        Ok(_) => Err(
+            "VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP must be either 0 or 1".to_string(),
+        ),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(
+            "VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP must contain valid Unicode".to_string(),
+        ),
+    }
 }
 
 fn backend_override_file(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -269,6 +298,7 @@ async fn start_server(
     state: State<'_, ServerState>,
     remote: Option<bool>,
     models_dir: Option<String>,
+    remote_api_token: Option<String>,
 ) -> Result<String, String> {
     // Store models_dir for use on restart (empty string means reset to default)
     if let Some(ref dir) = models_dir {
@@ -277,6 +307,39 @@ async fn start_server(
         } else {
             *state.models_dir.lock().unwrap() = Some(dir.clone());
         }
+    }
+    if let Some(remote_mode) = remote {
+        *state.remote_mode.lock().unwrap() = remote_mode;
+    }
+    if let Some(token) = remote_api_token {
+        if token.is_empty() {
+            *state.remote_api_token.lock().unwrap() = None;
+        } else {
+            validate_remote_api_token(&token)?;
+            *state.remote_api_token.lock().unwrap() = Some(token);
+        }
+    }
+    let is_remote = *state.remote_mode.lock().unwrap();
+    let effective_remote_api_token = state
+        .remote_api_token
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| std::env::var("VOICEBOX_REMOTE_API_TOKEN").ok());
+    if let Some(ref token) = effective_remote_api_token {
+        validate_remote_api_token(token)?;
+    }
+    let bind_remote = is_remote && insecure_remote_http_allowed()?;
+    if is_remote && !bind_remote {
+        eprintln!(
+            "Network access requested, but direct HTTP binding is disabled; keeping the server on loopback"
+        );
+    }
+    if bind_remote && effective_remote_api_token.is_none() {
+        return Err(
+            "Remote network access requires a 32+ character Remote API token in Settings"
+                .to_string(),
+        );
     }
     // Check if server is already running (managed by this app instance)
     if state.child.lock().unwrap().is_some() {
@@ -546,8 +609,6 @@ async fn start_server(
         .to_string();
     let port_str = SERVER_PORT.to_string();
     let parent_pid_str = std::process::id().to_string();
-    let is_remote = remote.unwrap_or(false);
-
     // Resolve the custom models directory from the parameter or stored state
     let effective_models_dir = models_dir.or_else(|| state.models_dir.lock().unwrap().clone());
     if let Some(ref dir) = effective_models_dir {
@@ -585,8 +646,9 @@ async fn start_server(
             let mut cmd = app.shell().command(rocm_path.to_str().unwrap());
             cmd = cmd.current_dir(rocm_dir);
             cmd = cmd.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
-            if is_remote { cmd = cmd.args(["--host", "0.0.0.0"]); }
+            if bind_remote { cmd = cmd.args(["--host", "0.0.0.0"]); }
             if let Some(ref dir) = effective_models_dir { cmd = cmd.env("VOICEBOX_MODELS_DIR", dir); }
+            if let Some(ref token) = effective_remote_api_token { cmd = cmd.env("VOICEBOX_REMOTE_API_TOKEN", token); }
             match cmd.spawn() {
                 Ok(r) => { gpu_spawn = Some(Ok(r)); }
                 Err(e) => { println!("ROCm spawn failed ({}), trying CUDA/CPU fallback", e); }
@@ -600,8 +662,9 @@ async fn start_server(
                 let mut cmd = app.shell().command(cuda_path.to_str().unwrap());
                 cmd = cmd.current_dir(cuda_dir);
                 cmd = cmd.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
-                if is_remote { cmd = cmd.args(["--host", "0.0.0.0"]); }
+                if bind_remote { cmd = cmd.args(["--host", "0.0.0.0"]); }
                 if let Some(ref dir) = effective_models_dir { cmd = cmd.env("VOICEBOX_MODELS_DIR", dir); }
+                if let Some(ref token) = effective_remote_api_token { cmd = cmd.env("VOICEBOX_REMOTE_API_TOKEN", token); }
                 match cmd.spawn() {
                     Ok(r) => { gpu_spawn = Some(Ok(r)); }
                     Err(e) => { println!("CUDA spawn failed ({}), falling back to CPU", e); }
@@ -614,8 +677,9 @@ async fn start_server(
         } else {
             // Fall back to bundled CPU sidecar
             sidecar = sidecar.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
-            if is_remote { sidecar = sidecar.args(["--host", "0.0.0.0"]); }
+            if bind_remote { sidecar = sidecar.args(["--host", "0.0.0.0"]); }
             if let Some(ref dir) = effective_models_dir { sidecar = sidecar.env("VOICEBOX_MODELS_DIR", dir); }
+            if let Some(ref token) = effective_remote_api_token { sidecar = sidecar.env("VOICEBOX_REMOTE_API_TOKEN", token); }
             println!("Spawning bundled CPU server process...");
             sidecar.spawn()
         }
@@ -623,11 +687,14 @@ async fn start_server(
         // Override forces CPU — use bundled sidecar, GPU binary stays on disk
         println!("Backend override=cpu: using bundled CPU sidecar");
         sidecar = sidecar.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
-        if is_remote {
+        if bind_remote {
             sidecar = sidecar.args(["--host", "0.0.0.0"]);
         }
         if let Some(ref dir) = effective_models_dir {
             sidecar = sidecar.env("VOICEBOX_MODELS_DIR", dir);
+        }
+        if let Some(ref token) = effective_remote_api_token {
+            sidecar = sidecar.env("VOICEBOX_REMOTE_API_TOKEN", token);
         }
         sidecar.spawn()
     };
@@ -902,7 +969,7 @@ async fn restart_server(
 
     // Start server again (will auto-detect GPU binary and use stored models_dir)
     println!("restart_server: starting server...");
-    start_server(app, state.clone(), None, None).await
+    start_server(app, state.clone(), None, None, None).await
 }
 
 #[command]
@@ -1390,6 +1457,8 @@ pub fn run() {
             server_pid: Mutex::new(None),
             keep_running_on_close: Mutex::new(false),
             models_dir: Mutex::new(None),
+            remote_mode: Mutex::new(false),
+            remote_api_token: Mutex::new(None),
             backend_override: Mutex::new(None),
         })
         .manage(audio_capture::AudioCaptureState::new())

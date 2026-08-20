@@ -2,10 +2,115 @@
 Audio processing utilities.
 """
 
+import os
+import tempfile
+import threading
+import uuid
+from contextlib import suppress
+from pathlib import Path
+
+import librosa
 import numpy as np
 import soundfile as sf
-import librosa
-from typing import Tuple, Optional
+
+from .disk_reservations import DiskSpaceReservationError, reserve_disk_space
+
+_NORMALIZE_BLOCK_FRAMES = 1_048_576
+_NORMALIZE_MIN_FREE_BYTES = 1024**3
+_normalization_disk_lock = threading.Lock()
+
+
+def _is_voicebox_disk_backed_audio(audio: object) -> bool:
+    return isinstance(audio, np.memmap) and getattr(audio, "_voicebox_disk_backed_audio", False) is True
+
+
+def _normalize_disk_backed_audio(
+    audio: np.memmap,
+    target_db: float,
+    peak_limit: float,
+) -> np.ndarray:
+    """Normalize an owned memmap in place with legacy-identical arithmetic.
+
+    The legacy RMS calculation first materialized ``audio ** 2``. Store that
+    intermediate in another anonymous mapping so NumPy retains the exact same
+    float32 reduction order without allocating a timeline-sized RAM array.
+    Element-wise gain and clipping are then applied to bounded slices.
+    """
+    if audio.ndim != 1 or audio.dtype != np.float32:
+        raise ValueError("Disk-backed generated audio must be mono float32")
+    if len(audio) == 0:
+        return audio
+
+    # Keep this import lazy: one legacy standalone test imports ``utils.audio``
+    # without the ``backend`` package, while disk-backed buffers exist only in
+    # normal package-backed runtime paths.
+    from .. import config
+
+    cache_directory = config.get_cache_dir()
+    squared_file = None
+    squared = None
+    reservation = None
+    with _normalization_disk_lock:
+        try:
+            try:
+                reservation = reserve_disk_space(
+                    cache_directory,
+                    audio.nbytes,
+                    min_free_bytes=_NORMALIZE_MIN_FREE_BYTES,
+                )
+            except DiskSpaceReservationError as exc:
+                raise OSError(
+                    "Insufficient free space to normalize generated audio while preserving the disk reserve"
+                ) from exc
+            squared_file = tempfile.TemporaryFile(  # noqa: SIM115 - closed in the cross-platform cleanup below
+                mode="w+b",
+                buffering=0,
+                prefix=".normalize-audio-",
+                dir=cache_directory,
+            )
+            if os.name == "posix":
+                os.fchmod(squared_file.fileno(), 0o600)
+            squared_file.truncate(audio.nbytes)
+            squared = np.memmap(
+                squared_file,
+                dtype=np.float32,
+                mode="r+",
+                shape=audio.shape,
+            )
+            for start in range(0, len(audio), _NORMALIZE_BLOCK_FRAMES):
+                end = min(start + _NORMALIZE_BLOCK_FRAMES, len(audio))
+                np.square(audio[start:end], out=squared[start:end])
+
+            # np.mean over the contiguous float32 mapping intentionally
+            # mirrors np.mean(audio ** 2), including NumPy's reduction order.
+            rms = np.sqrt(np.mean(squared))
+            target_rms = 10 ** (target_db / 20)
+            gain = target_rms / rms if rms > 0 else None
+            for start in range(0, len(audio), _NORMALIZE_BLOCK_FRAMES):
+                end = min(start + _NORMALIZE_BLOCK_FRAMES, len(audio))
+                block = audio[start:end]
+                if gain is not None:
+                    np.multiply(block, gain, out=block)
+                np.clip(block, -peak_limit, peak_limit, out=block)
+            audio.flush()
+            return audio
+        except OSError:
+            raise
+        except Exception as exc:
+            raise OSError("Could not normalize disk-backed generated audio") from exc
+        finally:
+            if squared is not None:
+                with suppress(Exception):
+                    squared.flush()
+                mapping = getattr(squared, "_mmap", None)
+                if mapping is not None:
+                    with suppress(Exception):
+                        mapping.close()
+            if squared_file is not None:
+                with suppress(Exception):
+                    squared_file.close()
+            if reservation is not None:
+                reservation.release()
 
 
 def normalize_audio(
@@ -15,32 +120,35 @@ def normalize_audio(
 ) -> np.ndarray:
     """
     Normalize audio to target loudness with peak limiting.
-    
+
     Args:
         audio: Input audio array
         target_db: Target RMS level in dB
         peak_limit: Peak limit (0.0-1.0)
-        
+
     Returns:
         Normalized audio array
     """
+    if _is_voicebox_disk_backed_audio(audio):
+        return _normalize_disk_backed_audio(audio, target_db, peak_limit)
+
     # Convert to float32
     audio = audio.astype(np.float32)
-    
+
     # Calculate current RMS
     rms = np.sqrt(np.mean(audio**2))
-    
+
     # Calculate target RMS
-    target_rms = 10**(target_db / 20)
-    
+    target_rms = 10 ** (target_db / 20)
+
     # Apply gain
     if rms > 0:
         gain = target_rms / rms
         audio = audio * gain
-    
+
     # Peak limiting
     audio = np.clip(audio, -peak_limit, peak_limit)
-    
+
     return audio
 
 
@@ -48,19 +156,25 @@ def load_audio(
     path: str,
     sample_rate: int = 24000,
     mono: bool = True,
-) -> Tuple[np.ndarray, int]:
+    duration: float | None = None,
+) -> tuple[np.ndarray, int]:
     """
     Load audio file with normalization.
-    
+
     Args:
         path: Path to audio file
         sample_rate: Target sample rate
         mono: Convert to mono
-        
+
     Returns:
         Tuple of (audio_array, sample_rate)
     """
-    audio, sr = librosa.load(path, sr=sample_rate, mono=mono)
+    audio, sr = librosa.load(
+        path,
+        sr=sample_rate,
+        mono=mono,
+        duration=duration,
+    )
     return audio, sr
 
 
@@ -84,28 +198,37 @@ def save_audio(
     Raises:
         OSError: If file cannot be written
     """
-    from pathlib import Path
-    import os
-
-    temp_path = f"{path}.tmp"
+    target_path = Path(path)
+    temp_path = target_path.with_name(f".{target_path.name}.tmp-{uuid.uuid4().hex}")
     try:
         # Ensure parent directory exists
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Write to temporary file first (explicit format since .tmp
         # extension is not recognised by soundfile)
-        sf.write(temp_path, audio, sample_rate, format='WAV')
+        sf.write(str(temp_path), audio, sample_rate, format="WAV")
+        file_descriptor = os.open(temp_path, os.O_RDONLY)
+        try:
+            os.fsync(file_descriptor)
+        finally:
+            os.close(file_descriptor)
 
         # Atomic rename to final path
-        os.replace(temp_path, path)
+        os.replace(temp_path, target_path)
+        try:
+            directory_descriptor = os.open(target_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError:
+            if os.name != "nt":
+                raise
 
     except Exception as e:
         # Clean up temp file on failure
-        try:
-            if Path(temp_path).exists():
-                Path(temp_path).unlink()
-        except Exception:
-            pass  # Best effort cleanup
+        with suppress(Exception):
+            temp_path.unlink(missing_ok=True)
 
         raise OSError(f"Failed to save audio to {path}: {e}") from e
 
@@ -184,12 +307,7 @@ def trim_tts_output(
     threshold_linear = 10 ** (silence_threshold_db / 20)
 
     # Compute per-frame RMS
-    rms = np.array(
-        [
-            np.sqrt(np.mean(audio[i * frame_len : (i + 1) * frame_len] ** 2))
-            for i in range(n_frames)
-        ]
-    )
+    rms = np.array([np.sqrt(np.mean(audio[i * frame_len : (i + 1) * frame_len] ** 2)) for i in range(n_frames)])
     is_speech = rms >= threshold_linear
 
     # Find first speech frame
@@ -301,7 +419,7 @@ def validate_reference_audio(
     min_duration: float = 2.0,
     max_duration: float = 30.0,
     min_rms: float = 0.01,
-) -> Tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """
     Validate reference audio for voice cloning.
 
@@ -314,9 +432,7 @@ def validate_reference_audio(
     Returns:
         Tuple of (is_valid, error_message)
     """
-    result = validate_and_load_reference_audio(
-        audio_path, min_duration, max_duration, min_rms
-    )
+    result = validate_and_load_reference_audio(audio_path, min_duration, max_duration, min_rms)
     return (result[0], result[1])
 
 
@@ -325,31 +441,34 @@ def validate_and_load_reference_audio(
     min_duration: float = 2.0,
     max_duration: float = 30.0,
     min_rms: float = 0.01,
-) -> Tuple[bool, Optional[str], Optional[np.ndarray], Optional[int]]:
+) -> tuple[bool, str | None, np.ndarray | None, int | None]:
     """
     Validate and load reference audio in a single pass.
 
-    Applies :func:`preprocess_reference_audio` before checks so that
-    slightly-hot recordings aren't rejected as clipping. Duration and RMS
-    checks run on the preprocessed waveform.
+    Bounds decoded PCM before preprocessing so an overlong source cannot be
+    silently accepted after the bounded prefix happens to trim short. RMS and
+    minimum-duration checks run on the canonical preprocessed waveform.
 
     Returns:
         Tuple of (is_valid, error_message, audio_array, sample_rate)
     """
     try:
-        audio, sr = load_audio(audio_path)
+        # Decode only enough audio to prove that the duration exceeds the
+        # accepted ceiling. A small compressed upload can otherwise expand to
+        # hours of float PCM before the post-decode duration check runs.
+        audio, sr = load_audio(audio_path, duration=max_duration + 1.0)
+        raw_duration = len(audio) / sr
+        if raw_duration > max_duration:
+            return False, f"Audio too long (maximum {max_duration} seconds)", None, None
         audio = preprocess_reference_audio(audio, sr)
         duration = len(audio) / sr
 
         if duration < min_duration:
             return False, f"Audio too short (minimum {min_duration} seconds)", None, None
-        if duration > max_duration:
-            return False, f"Audio too long (maximum {max_duration} seconds)", None, None
-
         rms = np.sqrt(np.mean(audio**2))
         if rms < min_rms:
             return False, "Audio is too quiet or silent", None, None
 
         return True, None, audio, sr
     except Exception as e:
-        return False, f"Error validating audio: {str(e)}", None, None
+        return False, f"Error validating audio: {e!s}", None, None

@@ -11,6 +11,7 @@ import { Progress } from '@/components/ui/progress';
 import { Toggle } from '@/components/ui/toggle';
 import { useToast } from '@/components/ui/use-toast';
 import { useAutoUpdater } from '@/hooks/useAutoUpdater';
+import { isSecureVoiceboxServerUrl } from '@/lib/api/authenticatedFetch';
 import { useServerHealth } from '@/lib/hooks/useServer';
 import { usePlatform } from '@/platform/PlatformContext';
 import { useServerStore } from '@/stores/serverStore';
@@ -19,9 +20,9 @@ import { LanguageSelect } from './LanguageSelect';
 import { SettingRow, SettingSection } from './SettingRow';
 import { ThemeSelect } from './ThemeSelect';
 
-function makeConnectionSchema(invalidUrl: string) {
+function makeConnectionSchema(invalidUrl: string, insecureRemoteUrl: string) {
   return z.object({
-    serverUrl: z.string().url(invalidUrl),
+    serverUrl: z.string().url(invalidUrl).refine(isSecureVoiceboxServerUrl, insecureRemoteUrl),
   });
 }
 
@@ -32,15 +33,24 @@ export function GeneralPage() {
   const platform = usePlatform();
   const serverUrl = useServerStore((state) => state.serverUrl);
   const setServerUrl = useServerStore((state) => state.setServerUrl);
+  const remoteApiToken = useServerStore((state) => state.remoteApiToken);
+  const setRemoteApiToken = useServerStore((state) => state.setRemoteApiToken);
   const keepServerRunningOnClose = useServerStore((state) => state.keepServerRunningOnClose);
   const setKeepServerRunningOnClose = useServerStore((state) => state.setKeepServerRunningOnClose);
   const mode = useServerStore((state) => state.mode);
   const setMode = useServerStore((state) => state.setMode);
   const { toast } = useToast();
   const { data: health, isLoading, error: healthError } = useServerHealth();
+  const [tokenDraft, setTokenDraft] = useState(remoteApiToken);
 
   const resolver = useMemo(
-    () => zodResolver(makeConnectionSchema(t('settings.general.serverUrl.invalidUrl'))),
+    () =>
+      zodResolver(
+        makeConnectionSchema(
+          t('settings.general.serverUrl.invalidUrl'),
+          t('settings.general.serverUrl.insecureRemoteUrl'),
+        ),
+      ),
     [t],
   );
   const form = useForm<ConnectionFormValues>({
@@ -51,6 +61,10 @@ export function GeneralPage() {
   useEffect(() => {
     form.reset({ serverUrl });
   }, [serverUrl, form]);
+
+  useEffect(() => {
+    setTokenDraft(remoteApiToken);
+  }, [remoteApiToken]);
 
   // Re-run validation when the locale changes so existing error messages retranslate.
   useEffect(() => {
@@ -139,6 +153,43 @@ export function GeneralPage() {
               )}
             </form>
           </Form>
+        </SettingRow>
+
+        <SettingRow
+          title={t('settings.general.remoteApiToken.title')}
+          description={t('settings.general.remoteApiToken.description')}
+        >
+          <div className="flex gap-2">
+            <Input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={tokenDraft}
+              placeholder={t('settings.general.remoteApiToken.placeholder')}
+              onChange={(event) => setTokenDraft(event.target.value)}
+            />
+            {tokenDraft !== remoteApiToken && (
+              <Button
+                type="button"
+                size="sm"
+                disabled={
+                  tokenDraft.length > 0 &&
+                  (tokenDraft.length < 32 ||
+                    tokenDraft.length > 512 ||
+                    !/^[A-Za-z0-9._~-]+$/.test(tokenDraft))
+                }
+                onClick={() => {
+                  setRemoteApiToken(tokenDraft);
+                  toast({
+                    title: t('settings.general.remoteApiToken.updatedTitle'),
+                    description: t('settings.general.remoteApiToken.updatedDescription'),
+                  });
+                }}
+              >
+                {t('common.save')}
+              </Button>
+            )}
+          </div>
         </SettingRow>
 
         <SettingRow

@@ -219,3 +219,193 @@ Out of scope for this follow-up: the separate acoustic QA/calibration findings i
 - Bash syntax, ShellCheck, Python AST parsing, targeted Ruff checks/format checks and Git diff
   whitespace checks pass. The repository-wide legacy Ruff/pytest baselines remain as documented
   above and were not widened into this audiobook fix.
+
+## Inference-performance follow-up contract
+
+The second follow-up names five inference findings explicitly. This pass treats all five as
+acceptance requirements, while preserving the recovery and voice-integrity guarantees above:
+
+1. Prove the historical Qwen RTF and where wall time is spent from the durable render logs; do not
+   claim FFmpeg or HTTP work is the dominant optimization target.
+2. Keep the controlled mlx-audio 0.4.1 BF16 dtype backport, but bind every numerical optimization
+   and immutable model/runtime dependency into the exact `/health` and `/generate/exact` identity.
+3. Preserve completed work across backend profile UUID changes, bound backend-outage waits, restart
+   safely, and checkpoint every independently reusable synthesis unit.
+4. Add cloned-voice model-level batching beginning at batch size two only if the actual ICL path is
+   supported and quality/recovery semantics can fail closed. Do not fake batching with concurrent
+   HTTP requests or silently mix batched and serial contracts in an existing saved job.
+5. Cache the expensive, content-addressed reference conditioning itself (speaker embedding,
+   reference codec and reference-text preparation), not merely its WAV path. Invalidate the cache
+   on any reference/model/language change and on model unload.
+6. Provide a reproducible 3/6/10/20/current-reference benchmark with wall-time plus intelligibility,
+   speaker-similarity and prosody gates. A shorter production reference may be selected only from
+   real acoustic evidence; otherwise the current reference remains frozen.
+
+The current 17/33 legacy job must remain resumable under its frozen serial render contract. New
+throughput settings belong in the semantic renderer/runtime identity so an upgrade cannot
+silently reinterpret its completed artifacts.
+
+## Generation-memory and shared-storage follow-up
+
+Contract: keep legal 50,000-character / multi-hour TTS generation duration-independent in RAM,
+preserve the exact legacy crossfade and normalize-before-effects samples, enforce the 24-hour and
+1 GiB-reserve bounds, and drain cancellation before deleting private scratch or journaled output.
+
+Implementation result:
+
+- Multi-chunk and runaway-retried audio now accumulates in an anonymous/private float32 mapping;
+  callers release its mapping and temporary-file handle deterministically.
+- Normalization, WAV publication, streaming responses, and long effects render blockwise or through
+  bounded disk scratch. Foreground and background both normalize the generated input before effects.
+- A process-wide per-filesystem reservation ledger protects the same free bytes from concurrent
+  generation, effects, normalization, publication, checkpoints, stories, uploads, archives, caches,
+  profiles, and accelerator staging. Leases preserve the strongest active reserve floor and can be
+  atomically resized between phases; non-growth cleanup cannot fail merely because free space fell.
+- Exact checkpoints and journaled clean/processed publication retain their existing fsync and
+  recovery ordering. The legacy byte-returning service is capped at ten minutes; the HTTP stream
+  path remains disk-backed for the full legal request size.
+
+Validation record:
+
+- The focused generation/effects/checkpoint/stream matrix passes 171 tests, including byte-identical
+  legacy crossfades, bounded retention, cancellation cleanup, reserve overlap, and short plus forced
+  disk-pipeline foreground/background +6 dB parity.
+- The focused shared-reservation lifecycle tests pass, including failed growth preserving the old
+  claim and resize-to-zero succeeding after simulated external free-space exhaustion.
+- Targeted Ruff, Ruff format, Python compilation, and diff whitespace checks pass. Expected
+  Pydantic/SQLAlchemy deprecation warnings and the headless Metal atexit warning remain unchanged.
+
+## Audiobook runtime identity repair (2026-08-15)
+
+User goal: after stopping the stale backend on `127.0.0.1:17494`, make the audiobook launcher start
+against the current Voicebox checkout without weakening the exact-generation identity gate.
+
+Scope and decisions:
+
+- Treat `tts_implementation_revision=null` as an attestation failure, not a launcher condition to
+  bypass. The repair must refresh the embedded AST fingerprint from the settled numerical source
+  and derive a new runtime identity from that fingerprint plus the existing package/model pins.
+- Remove the launcher's duplicate manually copied current hash. It will load the reviewed embedded
+  identity from Voicebox's lightweight `mlx_runtime.py`; live startup still accepts it only when
+  `/health` reports the same value, so edited/unattested source continues to fail closed.
+- Preserve every existing dirty-worktree change. Only the attestation constant, the launcher pin,
+  their focused tests, and this run record are in scope.
+- Do not load a model or resume the preserved audiobook job while validating. Acceptance is a
+  model-free source-integrity test, matching live `/health`, a passing launcher compatibility check,
+  and successful GUI/backend process startup on port 17494.
+- Do not reuse the old c5 identity for changed executable sources; exact resume must fail closed
+  across numerical source changes.
+
+Acceptance checks:
+
+1. The current source fingerprint equals the embedded fingerprint under the backend venv.
+2. `/health` reports a non-null identity derived from the attested source and pinned runtime/model
+   inputs.
+3. `make_audio.TTS_IMPLEMENTATION_REVISION` is loaded from Voicebox's reviewed runtime metadata and
+   equals that exact backend identity, with regressions for missing or malformed metadata.
+4. Focused backend identity/exact-generation and launcher recovery tests pass; touched files pass
+   Ruff/format/compile checks.
+5. The old launcher/backend processes are replaced once and the audiobook maker prints that the
+   backend is ready at `http://127.0.0.1:17494`.
+
+Implementation and validation result:
+
+- The attested local source inventory now includes effects processing, the bounded voice-prompt
+  cache, and the shared disk-reservation implementation. Its embedded AST fingerprint matches the
+  settled source, yielding
+  `qwen3-mlx-audio-0.4.1-bf16-b2-icl-v3-runtime-sha256-9883b936782e3a234eb7c7e3fa1aaf2347410f7be4eed0d5c3c861819670f34f`.
+- The launcher loads that reviewed identity directly from Voicebox runtime metadata. Regressions
+  prove source-of-truth parity and fail closed for missing, malformed, or execution-failing
+  metadata, so a future manually copied launcher hash cannot drift from the backend again.
+- The model-free backend exact/audio matrix passed twice at 188/188 on the final source. The full
+  audiobook suite passed twice at 152/152, and its focused recovery/identity file passed 59/59
+  after the final loader hardening.
+- Backend Ruff and format checks, external Python compilation, targeted external Ruff F/E9/I
+  checks, and repository diff whitespace checks pass. The external scripts retain their older
+  whole-file formatting/lint baseline; this repair did not mechanically rewrite unrelated code.
+- The replacement backend is healthy on port 17494 and advertises the identity above; the live
+  launcher reports the startup contract as compatible and remains open. No model was loaded and
+  no saved audiobook work was resumed or mutated.
+
+## Five-minute narrator demos and transient-health recovery (2026-08-15)
+
+User goal: add a separate “demo rendering” action that renders the same representative five-minute
+excerpt in every selected voice, then lets the user choose one narrator before starting the full
+book. Also prevent a transient `/health` timeout from being misreported as a runtime change and
+terminating an otherwise valid renderer.
+
+Scope and decisions:
+
+- Keep the exact runtime gate fail-closed before new work starts and on a positively observed
+  revision mismatch. During an already-running render, an unreadable health response is only
+  absence of evidence: retain the renderer and retry until a healthy response can prove a match or
+  mismatch.
+- Build one deterministic excerpt from the middle of the selected normalized text, using complete
+  paragraphs/sentences and the shared 158-wpm estimate. Every selected voice receives identical
+  text, capped at the approximately five-minute word budget.
+- Expose “Demo rendering (5 min/voice)” beside “Start full rendering” on the review screen. Demo outputs
+  are lossless WAV files with explicit demo titles, use the same frozen voice/runtime/pitch/effects
+  pipeline, remain resumable, and never overwrite or reinterpret a full-book job.
+- After a successful in-session demo, show every output with Play/Reveal controls and require one
+  selected narrator before returning to the full-book review. A resumed demo remains recoverable
+  even if its original wizard draft no longer exists.
+- Do not restart or cancel the live backend. The orphaned exact generation accepted before the
+  timeout completed durably and must be recovered by normal deterministic resume.
+
+Acceptance checks:
+
+1. A timeout or connection error in the supervisory revision probe does not signal or fail the
+   renderer; a healthy response with another revision still does.
+2. Demo extraction is deterministic, non-empty, identical across voices, and bounded to the
+   five-minute word budget for short, long, Unicode, and oversized-paragraph sources.
+3. Demo start freezes a distinct resumable WAV job without mutating the full-book draft; success
+   restores that draft and narrows the final render to the narrator chosen on the result screen.
+4. Focused launcher/demo regressions and the complete audiobook test suite pass twice; targeted
+   lint, compilation, documentation, and diff audits are clean.
+
+Implementation and validation result:
+
+- The active-render supervisor now distinguishes an unreadable health probe from a positively
+  observed identity mismatch. The former keeps the renderer attached and retries; only the latter
+  terminates it. Initial/new-work admission remains fail-closed.
+- Review now offers a separate five-minute-per-voice demo action. It freezes one deterministic,
+  centered excerpt (790-word budget), uses the same excerpt for every selected voice, renders
+  sequential lossless WAVs through the production pipeline, and offers Play/Reveal plus a required
+  narrator choice before returning to full-book review in the same wizard session.
+- Saved progress records and validates `book` versus `demo` mode and the 300-second planning target;
+  pre-feature schema-1 jobs load as ordinary full-book work. Failed and restarted demos retain the
+  same immutable snapshot/resume behavior as normal jobs.
+- The timeout/mismatch and demo workflow regression file passes 65/65. The standalone progress,
+  integrity, locking, legacy-import, and corruption suite passes, including demo restart and invalid
+  metadata cases. The complete audiobook-maker suite passes twice at 158/158.
+- Targeted Ruff F/E9/I/W293 and Python compilation pass. Whole-file Ruff formatting remains the
+  external scripts' pre-existing baseline and was deliberately not used to rewrite unrelated code.
+- Live verification found the supposedly changed backend still healthy at the exact saved v3
+  revision. Generation `ad801966-cdf9-577f-8f8f-9d9b8d898a74` had completed durably; the relaunched
+  maker reattached, downloaded it without regeneration, advanced the book from 17/33 to 19/33
+  verified units, and continues rendering with the backend left running.
+
+## Demo assembly recovery and pitch tolerance (2026-08-15)
+
+- The resumed five-minute demo initially failed only while mastering the `podcast` voice: its
+  measured correction was -0.67 semitones, just outside the old 0.5-semitone guard. The saved
+  chunks were complete; no TTS output was lost.
+- Demo assembly now carries an explicit per-voice lower-pitch tolerance. The podcast profile uses
+  the measured 1.0-semitone tolerance, and older saved demo jobs without that field receive the
+  same bounded demo-only fallback. Full-book renders keep the strict default unless a voice
+  explicitly configures a tolerance.
+- Resume skipped all four already verified voices, assembled the saved podcast chunks, and produced
+  all five lossless narrator-demo WAVs. The maker now shows the narrator-selection screen.
+- The complete audiobook-maker regression suite passes 158/158 after this fix. Focused recovery,
+  lint, compilation, shell-syntax, and manual saved-chunk assembly checks also pass.
+
+## Natural-pitch voice family (2026-08-15)
+
+- Feedback identified the original, podcast, and expressive variants as poor matches. Their old
+  definitions changed reference corpus, chunk renderer, and/or pitch correction, which changed the
+  voice rather than merely changing delivery.
+- All comparison variants now inherit natural-pitch's book reference pair, phrase renderer, no
+  pitch correction, chunk size, and crossfade. They differ only in explicit pause scale: original
+  0.60, expressive 0.65, podcast 0.75; natural-pitch remains the 0.50 canonical base.
+- New audiobook selection defaults to natural-pitch. A regression contract verifies the shared base,
+  bounded pause scales, and the default selection; the full audiobook suite passes 161/161.

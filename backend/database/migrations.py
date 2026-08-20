@@ -38,6 +38,7 @@ def run_migrations(engine) -> None:
 
     _migrate_story_items(engine, inspector, tables)
     _migrate_profiles(engine, inspector, tables)
+    _migrate_profile_samples(engine, inspector, tables)
     _migrate_generations(engine, inspector, tables)
     _migrate_effect_presets(engine, inspector, tables)
     _migrate_generation_versions(engine, inspector, tables)
@@ -47,6 +48,7 @@ def run_migrations(engine) -> None:
 
 
 # -- helpers ---------------------------------------------------------------
+
 
 def _get_columns(inspector, table: str) -> set[str]:
     return {col["name"] for col in inspector.get_columns(table)}
@@ -62,6 +64,7 @@ def _add_column(engine, table: str, column_sql: str, label: str) -> None:
 
 # -- per-table migrations --------------------------------------------------
 
+
 def _migrate_story_items(engine, inspector, tables: set[str]) -> None:
     if "story_items" not in tables:
         return
@@ -73,15 +76,15 @@ def _migrate_story_items(engine, inspector, tables: set[str]) -> None:
         logger.info("Migrating story_items: removing position column, using start_time_ms")
         with engine.connect() as conn:
             if "start_time_ms" not in columns:
-                conn.execute(text(
-                    "ALTER TABLE story_items ADD COLUMN start_time_ms INTEGER DEFAULT 0"
-                ))
-                result = conn.execute(text("""
+                conn.execute(text("ALTER TABLE story_items ADD COLUMN start_time_ms INTEGER DEFAULT 0"))
+                result = conn.execute(
+                    text("""
                     SELECT si.id, si.story_id, si.position, g.duration
                     FROM story_items si
                     JOIN generations g ON si.generation_id = g.id
                     ORDER BY si.story_id, si.position
-                """))
+                """)
+                )
                 current_story_id = None
                 current_time_ms = 0
                 for item_id, story_id, _position, duration in result.fetchall():
@@ -96,7 +99,8 @@ def _migrate_story_items(engine, inspector, tables: set[str]) -> None:
                 conn.commit()
 
             # Recreate table without the position column (SQLite lacks DROP COLUMN)
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 CREATE TABLE story_items_new (
                     id VARCHAR PRIMARY KEY,
                     story_id VARCHAR NOT NULL,
@@ -110,13 +114,16 @@ def _migrate_story_items(engine, inspector, tables: set[str]) -> None:
                     FOREIGN KEY (story_id) REFERENCES stories(id),
                     FOREIGN KEY (generation_id) REFERENCES generations(id)
                 )
-            """))
-            conn.execute(text("""
+            """)
+            )
+            conn.execute(
+                text("""
                 INSERT INTO story_items_new (id, story_id, generation_id, start_time_ms, track, trim_start_ms, trim_end_ms, version_id, created_at)
                 SELECT id, story_id, generation_id, start_time_ms,
                     COALESCE(track, 0), COALESCE(trim_start_ms, 0), COALESCE(trim_end_ms, 0), version_id, created_at
                 FROM story_items
-            """))
+            """)
+            )
             conn.execute(text("DROP TABLE story_items"))
             conn.execute(text("ALTER TABLE story_items_new RENAME TO story_items"))
             conn.commit()
@@ -161,6 +168,46 @@ def _migrate_profiles(engine, inspector, tables: set[str]) -> None:
         _add_column(engine, "profiles", "personality TEXT", "personality")
 
 
+def _migrate_profile_samples(engine, inspector, tables: set[str]) -> None:
+    """Freeze the historical insertion order of every profile's samples."""
+    if "profile_samples" not in tables:
+        return
+
+    columns = _get_columns(inspector, "profile_samples")
+    added_ordinal = "ordinal" not in columns
+
+    with engine.begin() as conn:
+        if added_ordinal:
+            conn.execute(text("ALTER TABLE profile_samples ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0"))
+
+            # Prior releases read rows without ORDER BY. Voicebox only supports
+            # SQLite, whose rowid captures the insertion order those databases
+            # historically returned. Persist that order once; UUIDs merely
+            # locate rows and never participate in sequencing.
+            rows = conn.execute(
+                text("SELECT id, profile_id FROM profile_samples ORDER BY profile_id, rowid")
+            ).fetchall()
+            next_ordinal: dict[str, int] = {}
+            for sample_id, profile_id in rows:
+                ordinal = next_ordinal.get(profile_id, 0)
+                conn.execute(
+                    text("UPDATE profile_samples SET ordinal = :ordinal WHERE id = :sample_id"),
+                    {"ordinal": ordinal, "sample_id": sample_id},
+                )
+                next_ordinal[profile_id] = ordinal + 1
+
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_profile_samples_profile_ordinal "
+                "ON profile_samples (profile_id, ordinal)"
+            )
+        )
+
+    if added_ordinal:
+        logger.info("Added ordinal column to profile_samples and preserved legacy insertion order")
+
+
 def _migrate_generations(engine, inspector, tables: set[str]) -> None:
     if "generations" not in tables:
         return
@@ -183,6 +230,41 @@ def _migrate_generations(engine, inspector, tables: set[str]) -> None:
             "generations",
             "source VARCHAR NOT NULL DEFAULT 'manual'",
             "source",
+        )
+    if "exact_request_sha256" not in columns:
+        _add_column(
+            engine,
+            "generations",
+            "exact_request_sha256 VARCHAR",
+            "exact_request_sha256",
+        )
+    if "exact_envelope_sha256" not in columns:
+        _add_column(
+            engine,
+            "generations",
+            "exact_envelope_sha256 VARCHAR",
+            "exact_envelope_sha256",
+        )
+    if "exact_effects_json" not in columns:
+        _add_column(
+            engine,
+            "generations",
+            "exact_effects_json TEXT",
+            "exact_effects_json",
+        )
+    if "exact_voice_snapshot_json" not in columns:
+        _add_column(
+            engine,
+            "generations",
+            "exact_voice_snapshot_json TEXT",
+            "exact_voice_snapshot_json",
+        )
+    if "voice_binding_sha256" not in columns:
+        _add_column(
+            engine,
+            "generations",
+            "voice_binding_sha256 VARCHAR",
+            "voice_binding_sha256",
         )
 
 
@@ -296,9 +378,7 @@ def _normalize_storage_paths(engine, tables: set[str]) -> None:
     """Normalize stored file paths to be relative to the configured data dir."""
     from pathlib import Path
 
-    from ..config import get_data_dir, to_storage_path, resolve_storage_path
-
-    data_dir = get_data_dir()
+    from ..config import resolve_storage_path, to_storage_path
 
     path_columns = [
         ("generations", "audio_path"),
@@ -312,9 +392,7 @@ def _normalize_storage_paths(engine, tables: set[str]) -> None:
         for table, column in path_columns:
             if table not in tables:
                 continue
-            rows = conn.execute(
-                text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")
-            ).fetchall()
+            rows = conn.execute(text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")).fetchall()
             for row_id, path_val in rows:
                 if not path_val:
                     continue

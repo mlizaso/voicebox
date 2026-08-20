@@ -4,7 +4,11 @@ import { getDefaultServerUrl } from '@/stores/serverStore';
 class WebLifecycle implements PlatformLifecycle {
   onServerReady?: () => void;
 
-  async startServer(_remote = false, _modelsDir?: string | null): Promise<string> {
+  async startServer(
+    _remote = false,
+    _modelsDir?: string | null,
+    _remoteApiToken?: string | null,
+  ): Promise<string> {
     // Web assumes server is running externally
     const serverUrl = import.meta.env.VITE_SERVER_URL || getDefaultServerUrl();
     this.onServerReady?.();

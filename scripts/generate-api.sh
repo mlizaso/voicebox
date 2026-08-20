@@ -40,7 +40,7 @@ if ! curl -s http://localhost:17493/openapi.json > /dev/null 2>&1; then
     
     if ! curl -s http://localhost:17493/openapi.json > /dev/null 2>&1; then
         echo "Error: Backend failed to start"
-        kill $BACKEND_PID 2>/dev/null || true
+        kill "$BACKEND_PID" 2>/dev/null || true
         exit 1
     fi
     
@@ -70,12 +70,16 @@ bunx --bun openapi-typescript-codegen \
     --useOptions \
     --exportSchemas true
 
+# The generator owns core/request.ts. Re-apply the shared authenticated
+# transport so remote bearer/session support cannot disappear on regeneration.
+python ../scripts/patch-generated-api-auth.py src/lib/api/core/request.ts
+
 echo "API client generated in app/src/lib/api"
 
 # Clean up
 if [ "$STARTED_BACKEND" = true ]; then
     echo "Stopping backend server..."
-    kill $BACKEND_PID 2>/dev/null || true
+    kill "$BACKEND_PID" 2>/dev/null || true
 fi
 
 echo "Done!"

@@ -2,10 +2,14 @@
 MLX backend implementation for TTS and STT using mlx-audio.
 """
 
-import asyncio
+# ruff: noqa: E402 -- the offline patch must run before imports that touch HF.
+
+import hashlib
 import logging
+import secrets
+from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -13,19 +17,32 @@ logger = logging.getLogger(__name__)
 
 # PATCH: Import and apply offline patch BEFORE any huggingface_hub usage
 # This prevents mlx_audio from making network requests when models are cached
-from ..utils.hf_offline_patch import patch_huggingface_hub_offline, ensure_original_qwen_config_cached
+from ..utils.hf_offline_patch import ensure_original_qwen_config_cached, patch_huggingface_hub_offline
 
 patch_huggingface_hub_offline()
 ensure_original_qwen_config_cached()
 
-from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
-from .base import is_model_cached, combine_voice_prompts as _combine_voice_prompts, model_load_progress
+from ..utils.cache import cache_voice_prompt, get_cache_key, get_cached_voice_prompt
+from . import LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
+from .base import combine_voice_prompts as _combine_voice_prompts, is_model_cached, model_load_progress
+from .mlx_qwen_optimizations import (
+    MAX_QWEN_CLONE_BATCH_SIZE,
+    apply_qwen_icl_cache_backport,
+    build_reference_cache_key,
+    clear_qwen_reference_cache,
+    generate_qwen_icl_batch,
+    has_qwen_icl_cache_backport,
+    prepare_reference_conditioning,
+)
 from .mlx_runtime import (
     MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION as _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION,
     get_installed_mlx_audio_version,
     get_mlx_qwen_tts_model_spec,
 )
-from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
+from .mlx_tts_lifecycle import (
+    mlx_tts_lifecycle_guard,
+    run_blocking_operation_cancellation_safe as _run_blocking_mlx_operation,
+)
 
 _MLX_AUDIO_QWEN_MODEL_TYPE = "qwen3_tts"
 _MLX_AUDIO_QWEN_DTYPE_BACKPORT_MARKER = "_voicebox_mlx_audio_qwen_dtype_backport"
@@ -101,6 +118,9 @@ def _apply_mlx_audio_qwen_dtype_backport(model: object, mlx_audio_version: str |
 class MLXTTSBackend:
     """MLX-based TTS backend using mlx-audio."""
 
+    uses_mlx_request_context = True
+    uses_shared_mlx_lifecycle_guard = True
+
     def __init__(self, model_size: str = "1.7B"):
         self.model = None
         self.model_size = model_size
@@ -137,7 +157,7 @@ class MLXTTSBackend:
             revision=self._get_model_revision(model_size),
         )
 
-    async def load_model_async(self, model_size: Optional[str] = None):
+    async def load_model_async(self, model_size: str | None = None):
         """
         Lazy load the MLX TTS model.
 
@@ -147,16 +167,32 @@ class MLXTTSBackend:
         if model_size is None:
             model_size = self.model_size
 
+        async with mlx_tts_lifecycle_guard.hold("model loading"):
+            await self._ensure_model_loaded_locked(model_size)
+
+    @asynccontextmanager
+    async def mlx_request_context(self, model_size: str):
+        """Retain one immutable model-size binding for a complete request."""
+        requested_model_size = model_size or self.model_size
+        async with mlx_tts_lifecycle_guard.hold(f"{requested_model_size} model request"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            if self._current_model_size != requested_model_size:
+                raise RuntimeError("MLX TTS loaded a different model size than the request")
+            yield
+
+    async def _ensure_model_loaded_locked(self, model_size: str) -> None:
+        """Ensure one model size while the process-wide lifecycle guard is held."""
+
         # If already loaded with correct size, return
         if self.model is not None and self._current_model_size == model_size:
             return
 
         # Unload existing model if different size requested
         if self.model is not None and self._current_model_size != model_size:
-            self.unload_model()
+            self._unload_model_locked()
 
         # Run blocking load in thread pool
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        await _run_blocking_mlx_operation(self._load_model_sync, model_size)
 
     # Alias for compatibility
     load_model = load_model_async
@@ -177,6 +213,7 @@ class MLXTTSBackend:
 
             loaded_model = load(model_path, revision=model_revision)
             backport_applied = _apply_mlx_audio_qwen_dtype_backport(loaded_model, mlx_audio_version)
+            optimizations_applied = apply_qwen_icl_cache_backport(loaded_model, mlx_audio_version)
             is_qwen_model = (
                 getattr(loaded_model, "model_type", None) == _MLX_AUDIO_QWEN_MODEL_TYPE
                 or "qwen" in model_path.casefold()
@@ -187,26 +224,41 @@ class MLXTTSBackend:
                     "speaker-embedding dtype guard; refusing to load an unverified TTS "
                     "implementation"
                 )
+            if (
+                mlx_audio_version == _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION
+                and is_qwen_model
+                and not optimizations_applied
+            ):
+                raise RuntimeError(
+                    "mlx-audio 0.4.1 Qwen model does not support Voicebox's required "
+                    "ICL conditioning-cache and batch interfaces; refusing to load an "
+                    "unverified TTS implementation"
+                )
             self.model = loaded_model
 
         self._current_model_size = model_size
         self.model_size = model_size
         logger.info("MLX TTS model %s loaded successfully", model_size)
 
-    def unload_model(self):
-        """Unload the model to free memory."""
+    def _unload_model_locked(self) -> None:
         if self.model is not None:
+            clear_qwen_reference_cache(self.model)
             del self.model
             self.model = None
             self._current_model_size = None
             logger.info("MLX TTS model unloaded")
+
+    def unload_model(self):
+        """Unload the model only when no MLX TTS operation is active."""
+        with mlx_tts_lifecycle_guard.try_hold("model unloading"):
+            self._unload_model_locked()
 
     async def create_voice_prompt(
         self,
         audio_path: str,
         reference_text: str,
         use_cache: bool = True,
-    ) -> Tuple[dict, bool]:
+    ) -> tuple[dict, bool]:
         """
         Create voice prompt from reference audio.
 
@@ -227,22 +279,26 @@ class MLXTTSBackend:
         if use_cache:
             cache_key = get_cache_key(audio_path, reference_text)
             cached_prompt = get_cached_voice_prompt(cache_key)
-            if cached_prompt is not None:
-                # Return cached prompt (should be dict format)
-                if isinstance(cached_prompt, dict):
-                    # Validate that the cached audio file still exists
-                    cached_audio_path = cached_prompt.get("ref_audio") or cached_prompt.get("ref_audio_path")
-                    if cached_audio_path and Path(cached_audio_path).exists():
-                        return cached_prompt, True
-                    else:
-                        # Cached file no longer exists, invalidate cache
-                        logger.warning("Cached audio file not found: %s, regenerating prompt", cached_audio_path)
+            if cached_prompt is not None and isinstance(cached_prompt, dict):
+                # Cache identity is content based, so two paths can legitimately
+                # share an entry.  Rebind a copy to the caller's path instead of
+                # retaining the first path, which may later be overwritten.
+                rebound_prompt = dict(cached_prompt)
+                rebound_prompt["ref_audio"] = str(audio_path)
+                rebound_prompt.pop("ref_audio_path", None)
+                rebound_prompt["ref_text"] = reference_text
+                rebound_prompt["mlx_conditioning_key"] = build_reference_cache_key(
+                    audio_path,
+                    reference_text,
+                )
+                return rebound_prompt, True
 
         # MLX voice prompt format - store audio path and text
         # The model will process this during generation
         voice_prompt_items = {
             "ref_audio": str(audio_path),
             "ref_text": reference_text,
+            "mlx_conditioning_key": build_reference_cache_key(audio_path, reference_text),
         }
 
         # Cache if enabled
@@ -252,17 +308,33 @@ class MLXTTSBackend:
 
         return voice_prompt_items, False
 
+    def _prepare_reference_sync(self, voice_prompt: dict):
+        ref_audio = voice_prompt.get("ref_audio") or voice_prompt.get("ref_audio_path")
+        ref_text = voice_prompt.get("ref_text", "")
+        if not ref_audio or not Path(ref_audio).exists():
+            raise FileNotFoundError(
+                f"Voice-cloning reference audio is missing; refusing to generate with a different voice: {ref_audio}"
+            )
+        # Preparation reads, hashes, and decodes one immutable byte snapshot.
+        # A persisted prompt may outlive an in-place edit of its WAV, and a
+        # path replacement must not race cache identity construction.
+        return prepare_reference_conditioning(
+            self.model,
+            audio_path=ref_audio,
+            reference_text=ref_text,
+        )
+
     async def combine_voice_prompts(self, audio_paths, reference_texts):
-        return await _combine_voice_prompts(audio_paths, reference_texts)
+        return await _combine_voice_prompts(audio_paths, reference_texts, sample_rate=24000)
 
     async def generate(
         self,
         text: str,
         voice_prompt: dict,
         language: str = "en",
-        seed: Optional[int] = None,
-        instruct: Optional[str] = None,
-    ) -> Tuple[np.ndarray, int]:
+        seed: int | None = None,
+        instruct: str | None = None,
+    ) -> tuple[np.ndarray, int]:
         """
         Generate audio from text using voice prompt.
 
@@ -276,9 +348,12 @@ class MLXTTSBackend:
         Returns:
             Tuple of (audio_array, sample_rate)
         """
-        await self.load_model_async(None)
-
-        logger.info("Generating audio for text: %s", text)
+        text_identifier = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        logger.info(
+            "Generating audio (chars=%d, text_sha256=%s)",
+            len(text),
+            text_identifier,
+        )
 
         def _generate_sync():
             """Run synchronous generation in thread pool."""
@@ -317,8 +392,16 @@ class MLXTTSBackend:
 
                     sig = inspect.signature(self.model.generate)
                     if "ref_audio" in sig.parameters:
+                        model_ref_audio = ref_audio
+                        if has_qwen_icl_cache_backport(self.model):
+                            model_ref_audio = self._prepare_reference_sync(voice_prompt).audio
                         # Generate with voice cloning
-                        for result in self.model.generate(text, ref_audio=ref_audio, ref_text=ref_text, lang_code=lang):
+                        for result in self.model.generate(
+                            text,
+                            ref_audio=model_ref_audio,
+                            ref_text=ref_text,
+                            lang_code=lang,
+                        ):
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
                     else:
@@ -344,14 +427,79 @@ class MLXTTSBackend:
 
             return audio, sample_rate
 
-        # Run blocking inference in thread pool
-        audio, sample_rate = await asyncio.to_thread(_generate_sync)
+        requested_model_size = self.model_size
+        async with mlx_tts_lifecycle_guard.hold("serial inference"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            # Cancellation drains the executor thread before this context can
+            # release the shared model/global-RNG lifecycle guard.
+            audio, sample_rate = await _run_blocking_mlx_operation(_generate_sync)
 
         return audio, sample_rate
+
+    async def generate_batch(
+        self,
+        texts: Sequence[str],
+        voice_prompt: dict,
+        language: str = "en",
+        seeds: Sequence[int | None] | None = None,
+        instruct: str | None = None,
+    ) -> list[tuple[np.ndarray, int]]:
+        """Generate up to two clone chunks in one model-level forward pass.
+
+        The shared reference is conditioned once, while every row owns an
+        independent explicit PRNG stream.  Results retain input order so the
+        caller can checkpoint each logical chunk separately.
+        """
+        if not 1 <= len(texts) <= MAX_QWEN_CLONE_BATCH_SIZE:
+            raise ValueError(f"MLX Qwen clone batch size must be between 1 and {MAX_QWEN_CLONE_BATCH_SIZE}")
+        if instruct is not None:
+            raise NotImplementedError("MLX Qwen ICL batching does not support instructions")
+        if seeds is None:
+            concrete_seeds = [secrets.randbits(32) for _ in texts]
+        else:
+            if len(seeds) != len(texts):
+                raise ValueError("MLX Qwen clone batch requires one seed per text")
+            concrete_seeds = [seed if seed is not None else secrets.randbits(32) for seed in seeds]
+
+        try:
+            # Once this pinned backend accepts a batch, every failure is an
+            # inference failure.  Do not leak a third-party NotImplementedError
+            # to the generic capability fallback and silently change an exact
+            # audiobook request into the serial numerical algorithm.
+            requested_model_size = self.model_size
+            lang = LANGUAGE_CODE_TO_NAME.get(language, "auto")
+
+            def _generate_batch_sync() -> list[tuple[np.ndarray, int]]:
+                conditioning = self._prepare_reference_sync(voice_prompt)
+                indexed_results = generate_qwen_icl_batch(
+                    self.model,
+                    texts,
+                    conditioning,
+                    language=lang,
+                    seeds=concrete_seeds,
+                )
+                by_index: dict[int, tuple[np.ndarray, int]] = {}
+                for sequence_index, audio, sample_rate in indexed_results:
+                    if sequence_index in by_index or not 0 <= sequence_index < len(texts):
+                        raise RuntimeError("MLX Qwen clone batch returned an invalid sequence index")
+                    by_index[sequence_index] = (np.asarray(audio, dtype=np.float32), sample_rate)
+                if set(by_index) != set(range(len(texts))):
+                    raise RuntimeError("MLX Qwen clone batch returned incomplete results")
+                return [by_index[index] for index in range(len(texts))]
+
+            async with mlx_tts_lifecycle_guard.hold("batch inference"):
+                await self._ensure_model_loaded_locked(requested_model_size)
+                return await _run_blocking_mlx_operation(_generate_batch_sync)
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("Batched voice cloning failed; refusing serial or generic fallback") from exc
 
 
 class MLXSTTBackend:
     """MLX-based STT backend using mlx-audio Whisper."""
+
+    uses_shared_mlx_lifecycle_guard = True
 
     def __init__(self, model_size: str = "base"):
         self.model = None
@@ -365,7 +513,7 @@ class MLXSTTBackend:
         hf_repo = WHISPER_HF_REPOS.get(model_size, f"openai/whisper-{model_size}")
         return is_model_cached(hf_repo, weight_extensions=(".safetensors", ".bin", ".npz"))
 
-    async def load_model_async(self, model_size: Optional[str] = None):
+    async def load_model_async(self, model_size: str | None = None):
         """
         Lazy load the MLX Whisper model.
 
@@ -375,11 +523,17 @@ class MLXSTTBackend:
         if model_size is None:
             model_size = self.model_size
 
+        async with mlx_tts_lifecycle_guard.hold("MLX STT model loading"):
+            await self._ensure_model_loaded_locked(model_size)
+
+    async def _ensure_model_loaded_locked(self, model_size: str) -> None:
         if self.model is not None and self.model_size == model_size:
             return
 
-        # Run blocking load in thread pool
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        if self.model is not None:
+            self._unload_model_locked()
+
+        await _run_blocking_mlx_operation(self._load_model_sync, model_size)
 
     # Alias for compatibility
     load_model = load_model_async
@@ -400,18 +554,22 @@ class MLXSTTBackend:
         self.model_size = model_size
         logger.info("MLX Whisper model %s loaded successfully", model_size)
 
-    def unload_model(self):
-        """Unload the model to free memory."""
+    def _unload_model_locked(self) -> None:
         if self.model is not None:
             del self.model
             self.model = None
             logger.info("MLX Whisper model unloaded")
 
+    def unload_model(self):
+        """Unload the model only when no shared MLX operation is active."""
+        with mlx_tts_lifecycle_guard.try_hold("MLX STT model unloading"):
+            self._unload_model_locked()
+
     async def transcribe(
         self,
         audio_path: str,
-        language: Optional[str] = None,
-        model_size: Optional[str] = None,
+        language: str | None = None,
+        model_size: str | None = None,
     ) -> str:
         """
         Transcribe audio to text.
@@ -424,7 +582,7 @@ class MLXSTTBackend:
         Returns:
             Transcribed text
         """
-        await self.load_model_async(model_size)
+        requested_model_size = model_size or self.model_size
 
         def _transcribe_sync():
             """Run synchronous transcription in thread pool."""
@@ -442,12 +600,12 @@ class MLXSTTBackend:
             # Extract text from result
             if isinstance(result, str):
                 return result.strip()
-            elif isinstance(result, dict):
+            if isinstance(result, dict):
                 return result.get("text", "").strip()
-            elif hasattr(result, "text"):
+            if hasattr(result, "text"):
                 return result.text.strip()
-            else:
-                return str(result).strip()
+            return str(result).strip()
 
-        # Run blocking transcription in thread pool
-        return await asyncio.to_thread(_transcribe_sync)
+        async with mlx_tts_lifecycle_guard.hold("MLX STT inference"):
+            await self._ensure_model_loaded_locked(requested_model_size)
+            return await _run_blocking_mlx_operation(_transcribe_sync)

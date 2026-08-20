@@ -14,11 +14,11 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.audio import (  # noqa: E402
+from utils.audio import (
+    load_audio,
     preprocess_reference_audio,
     validate_and_load_reference_audio,
 )
-
 
 SR = 24000
 
@@ -106,6 +106,56 @@ def test_validate_rejects_too_short(tmp_path):
 
     assert not ok
     assert "too short" in (err or "").lower()
+
+
+def test_reference_validation_bounds_decode_before_duration_check(monkeypatch):
+    observed = {}
+
+    def bounded_decode(path, *, sr, mono, duration):
+        observed.update(path=path, sr=sr, mono=mono, duration=duration)
+        return _tone(duration, amp=0.3), SR
+
+    monkeypatch.setattr("utils.audio.librosa.load", bounded_decode)
+
+    ok, err, _, _ = validate_and_load_reference_audio("compressed-reference.mp3")
+
+    assert not ok
+    assert "too long" in (err or "").lower()
+    assert observed == {
+        "path": "compressed-reference.mp3",
+        "sr": SR,
+        "mono": True,
+        "duration": 31.0,
+    }
+
+
+def test_overlong_bounded_prefix_cannot_pass_after_silence_trim(monkeypatch):
+    speech = _tone(10.0, amp=0.3)
+    trailing_silence = np.zeros(21 * SR, dtype=np.float32)
+
+    monkeypatch.setattr(
+        "utils.audio.librosa.load",
+        lambda *_args, **_kwargs: (np.concatenate([speech, trailing_silence]), SR),
+    )
+
+    ok, err, _, _ = validate_and_load_reference_audio("long-with-silence.mp3")
+
+    assert not ok
+    assert "too long" in (err or "").lower()
+
+
+def test_load_audio_keeps_unbounded_default_for_trusted_internal_callers(monkeypatch):
+    observed = {}
+
+    def decode(path, *, sr, mono, duration):
+        observed.update(path=path, sr=sr, mono=mono, duration=duration)
+        return np.zeros(1, dtype=np.float32), sr
+
+    monkeypatch.setattr("utils.audio.librosa.load", decode)
+
+    load_audio("trusted.wav")
+
+    assert observed["duration"] is None
 
 
 if __name__ == "__main__":

@@ -1,17 +1,23 @@
 """Generation history endpoints."""
 
-import io
+import mimetypes
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
 from ..app import safe_content_disposition
 from ..database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile, get_db
 from ..services import export_import, history
+from ..services.task_queue import generation_job_is_active
+from ..utils.responses import CleanupFileResponse
+from ..utils.upload_limits import UploadSizeLimitError, spool_upload_bounded
 
 router = APIRouter()
+GENERATION_ARCHIVE_MAX_BYTES = (
+    export_import.GENERATION_ARCHIVE_MAX_TOTAL_BYTES + export_import.ARCHIVE_EXPORT_OVERHEAD_BYTES
+)
 
 
 @router.get("/history", response_model=models.HistoryListResponse)
@@ -44,28 +50,43 @@ async def import_generation(
     db: Session = Depends(get_db),
 ):
     """Import a generation from a ZIP archive."""
-    MAX_FILE_SIZE = 50 * 1024 * 1024
-
-    content = await file.read()
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024)}MB"
-        )
-
+    archive_path = None
     try:
-        result = await export_import.import_generation_from_zip(content, db)
+        archive_path = await spool_upload_bounded(
+            file,
+            max_bytes=GENERATION_ARCHIVE_MAX_BYTES,
+            suffix=".zip",
+        )
+        result = await export_import.import_generation_from_zip(archive_path, db)
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except UploadSizeLimitError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"Generation archive is too large (max {exc.max_bytes // (1024 * 1024)} MB)"),
+        ) from exc
+    except export_import.ArchiveImportBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except export_import.ArchiveImportStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to import generation archive",
+        ) from exc
+    finally:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
 
 
 @router.delete("/history/failed")
 async def clear_failed_generations(db: Session = Depends(get_db)):
     """Delete every generation with status='failed'. Used by the UI's 'Clear failed' button (#410)."""
-    count = await history.delete_failed_generations(db)
+    try:
+        count = await history.delete_failed_generations(db)
+    except history.GenerationInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"deleted": count}
 
 
@@ -102,6 +123,11 @@ async def get_generation(
         status=gen.status or "completed",
         error=gen.error,
         is_favorited=bool(gen.is_favorited),
+        exact_request_sha256=gen.exact_request_sha256,
+        exact_envelope_sha256=gen.exact_envelope_sha256,
+        exact_effects_json=gen.exact_effects_json,
+        exact_voice_snapshot_json=gen.exact_voice_snapshot_json,
+        voice_binding_sha256=gen.voice_binding_sha256,
         created_at=gen.created_at,
         versions=versions,
         active_version_id=active_version_id,
@@ -128,7 +154,23 @@ async def delete_generation(
     db: Session = Depends(get_db),
 ):
     """Delete a generation."""
-    success = await history.delete_generation(generation_id, db)
+    generation = db.query(DBGeneration).filter_by(id=generation_id).first()
+    if generation is None:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    if generation_job_is_active(generation_id) or (generation.status or "completed") in {
+        "pending",
+        "queued",
+        "loading_model",
+        "generating",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Cancel this generation and wait for a terminal state before deleting it",
+        )
+    try:
+        success = await history.delete_generation(generation_id, db)
+    except history.GenerationInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Generation not found")
     return {"message": "Generation deleted successfully"}
@@ -143,26 +185,42 @@ async def export_generation(
     generation = db.query(DBGeneration).filter_by(id=generation_id).first()
     if not generation:
         raise HTTPException(status_code=404, detail="Generation not found")
+    generation_text = generation.text
 
+    archive_export = None
+    handed_to_response = False
     try:
-        zip_bytes = export_import.export_generation_to_zip(generation_id, db)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        archive_export = await export_import.export_generation_to_zip(generation_id, db)
 
-    safe_text = "".join(c for c in generation.text[:30] if c.isalnum() or c in (" ", "-", "_")).strip()
-    if not safe_text:
-        safe_text = "generation"
-    # Append a short id so exports of similarly-worded generations don't collide
-    # on the same filename (the first 30 chars are frequently identical).
-    filename = f"generation-{safe_text}-{generation_id[:8]}.voicebox.zip"
+        safe_text = "".join(c for c in generation_text[:30] if c.isalnum() or c in (" ", "-", "_")).strip()
+        if not safe_text:
+            safe_text = "generation"
+        # Append a short id so exports of similarly-worded generations don't collide
+        # on the same filename (the first 30 chars are frequently identical).
+        filename = f"generation-{safe_text}-{generation_id[:8]}.voicebox.zip"
+        db.close()
 
-    return StreamingResponse(
-        io.BytesIO(zip_bytes),
-        media_type="application/zip",
-        headers={"Content-Disposition": safe_content_disposition("attachment", filename)},
-    )
+        response = CleanupFileResponse(
+            archive_export.path,
+            media_type="application/zip",
+            headers={"Content-Disposition": safe_content_disposition("attachment", filename)},
+            cleanup=archive_export.cleanup,
+        )
+        handed_to_response = True
+        return response
+    except export_import.ArchiveExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except export_import.ArchiveExportStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except export_import.ArchiveExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to export generation") from exc
+    finally:
+        if archive_export is not None and not handed_to_response:
+            archive_export.cleanup()
 
 
 @router.get("/history/{generation_id}/export-audio")
@@ -187,10 +245,13 @@ async def export_generation_audio(
         safe_text = "generation"
     # Append a short id so exports of similarly-worded generations don't collide
     # on the same filename (the first 30 chars are frequently identical).
-    filename = f"{safe_text}-{generation_id[:8]}.wav"
+    audio_suffix = audio_path.suffix or ".wav"
+    filename = f"{safe_text}-{generation_id[:8]}{audio_suffix}"
+    media_type, _encoding = mimetypes.guess_type(audio_path.name)
+    db.close()
 
     return FileResponse(
         audio_path,
-        media_type="audio/wav",
+        media_type=media_type or "application/octet-stream",
         headers={"Content-Disposition": safe_content_disposition("attachment", filename)},
     )

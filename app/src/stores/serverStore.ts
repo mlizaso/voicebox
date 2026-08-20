@@ -6,6 +6,9 @@ interface ServerStore {
   serverUrl: string;
   setServerUrl: (url: string) => void;
 
+  remoteApiToken: string;
+  setRemoteApiToken: (token: string) => void;
+
   isConnected: boolean;
   setIsConnected: (connected: boolean) => void;
 
@@ -35,11 +38,7 @@ export function getDefaultServerUrl(): string {
   }
 
   const { protocol, origin, hostname } = window.location;
-  if (
-    (protocol === 'http:' || protocol === 'https:') &&
-    origin &&
-    hostname !== 'tauri.localhost'
-  ) {
+  if ((protocol === 'http:' || protocol === 'https:') && origin && hostname !== 'tauri.localhost') {
     return origin;
   }
 
@@ -69,6 +68,15 @@ export const useServerStore = create<ServerStore>()(
         const prev = get().serverUrl;
         set({ serverUrl: url });
         if (url !== prev) {
+          invalidateAllServerData();
+        }
+      },
+
+      remoteApiToken: '',
+      setRemoteApiToken: (token) => {
+        const prev = get().remoteApiToken;
+        set({ remoteApiToken: token });
+        if (token !== prev) {
           invalidateAllServerData();
         }
       },

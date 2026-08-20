@@ -40,6 +40,7 @@ import {
 } from '@/components/ui/dialog';
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/components/ui/use-toast';
+import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import type { ActiveDownloadTask, HuggingFaceModelInfo, ModelStatus } from '@/lib/api/types';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
@@ -1017,7 +1018,7 @@ export function ModelManagement() {
 
                   // Connect to SSE for progress
                   await new Promise<void>((resolve, reject) => {
-                    const es = new EventSource(apiClient.getMigrationProgressUrl());
+                    const es = authenticatedEventSource(apiClient.getMigrationProgressUrl());
                     es.onmessage = (event) => {
                       try {
                         const data = JSON.parse(event.data);

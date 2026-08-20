@@ -7,7 +7,7 @@ import pytest
 
 from backend.backends import engine_needs_trim, engine_retries_runaway
 from backend.utils.audio import has_tts_runaway
-from backend.utils.chunked_tts import generate_chunked
+from backend.utils.chunked_tts import generate_chunked, is_disk_backed_audio, release_disk_backed_audio
 
 SAMPLE_RATE = 1000
 
@@ -81,9 +81,13 @@ async def test_runaway_chunk_is_retried_as_smaller_chunks():
         runaway_detector=has_tts_runaway,
     )
 
-    assert sample_rate == SAMPLE_RATE
-    assert backend.calls == [text, f"{'A' * 119}.", f"{'B' * 119}."]
-    assert len(audio) == 1950
+    try:
+        assert sample_rate == SAMPLE_RATE
+        assert backend.calls == [text, f"{'A' * 119}.", f"{'B' * 119}."]
+        assert len(audio) == 1950
+        assert is_disk_backed_audio(audio)
+    finally:
+        release_disk_backed_audio(audio)
 
 
 @pytest.mark.asyncio

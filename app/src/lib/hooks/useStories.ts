@@ -233,8 +233,6 @@ export function useExportStoryAudio() {
 
   return useMutation({
     mutationFn: async ({ storyId, storyName }: { storyId: string; storyName: string }) => {
-      const blob = await apiClient.exportStoryAudio(storyId);
-
       // Create safe filename
       const safeName = storyName
         .substring(0, 50)
@@ -242,14 +240,20 @@ export function useExportStoryAudio() {
         .toLowerCase();
       const filename = `${safeName || 'story'}.wav`;
 
-      await platform.filesystem.saveFile(filename, blob, [
-        {
-          name: 'Audio File',
-          extensions: ['wav'],
-        },
-      ]);
-
-      return blob;
+      // 24 hours of 24 kHz mono PCM16 plus the 44-byte WAV header. Keep this
+      // aligned with the backend's RIFF-safe Story export ceiling.
+      const maxExportBytes = 4_147_200_044;
+      await platform.filesystem.saveResponse(
+        filename,
+        () => apiClient.exportStoryAudio(storyId),
+        maxExportBytes,
+        [
+          {
+            name: 'Audio File',
+            extensions: ['wav'],
+          },
+        ],
+      );
     },
   });
 }

@@ -1,14 +1,17 @@
 """LLM inference endpoints."""
 
 import logging
+from contextlib import suppress
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from .. import models
 from ..backends import get_llm_model_configs
+from ..backends.mlx_tts_lifecycle import run_tts_operation_cancellation_safe
 from ..services import llm
 from ..services.task_queue import create_background_task
+from ..utils.progress import get_progress_manager
 from ..utils.tasks import get_task_manager
 
 logger = logging.getLogger(__name__)
@@ -33,16 +36,30 @@ async def llm_generate(request: models.LLMGenerateRequest):
     if not already_loaded and not backend._is_model_cached(model_size):
         progress_model_name = f"qwen3-{model_size.lower()}"
         task_manager = get_task_manager()
+        progress_manager = get_progress_manager()
+        from .models import (
+            ModelDownloadAlreadyActiveError,
+            start_owned_model_download_task,
+        )
 
         async def download_llm_background():
             try:
-                await backend.load_model(model_size)
+                await run_tts_operation_cancellation_safe(
+                    backend,
+                    backend.load_model(model_size),
+                )
                 task_manager.complete_download(progress_model_name)
             except Exception as e:
                 task_manager.error_download(progress_model_name, str(e))
 
-        task_manager.start_download(progress_model_name)
-        create_background_task(download_llm_background())
+        with suppress(ModelDownloadAlreadyActiveError):
+            start_owned_model_download_task(
+                progress_model_name,
+                download_llm_background(),
+                task_manager=task_manager,
+                progress_manager=progress_manager,
+                task_factory=create_background_task,
+            )
 
         return JSONResponse(
             status_code=202,

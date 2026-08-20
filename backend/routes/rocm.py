@@ -1,16 +1,11 @@
 """ROCm backend management endpoints."""
 
-import logging
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..services.task_queue import create_background_task
 from ..utils.progress import get_progress_manager
 
 router = APIRouter()
-
-logger = logging.getLogger(__name__)
 
 
 @router.get("/backend/rocm-status")
@@ -26,18 +21,12 @@ async def download_rocm_backend():
     """Download the ROCm backend binary."""
     from ..services import rocm
 
-    progress_manager = get_progress_manager()
-    existing = progress_manager.get_progress(rocm.PROGRESS_KEY)
-    if existing and existing.get("status") in {"downloading", "extracting"}:
-        raise HTTPException(status_code=409, detail="ROCm backend download already in progress")
-
-    async def _download():
-        try:
-            await rocm.download_rocm_binary()
-        except Exception as e:
-            logger.error("ROCm download failed: %s", e)
-
-    create_background_task(_download())
+    try:
+        rocm.schedule_rocm_binary_download()
+    except rocm.BackendOperationBusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return {"message": "ROCm backend download started", "progress_key": rocm.PROGRESS_KEY}
 
 
@@ -52,7 +41,10 @@ async def delete_rocm_backend():
             detail="Cannot delete ROCm backend while it is active. Switch to CPU first.",
         )
 
-    deleted = await rocm.delete_rocm_binary()
+    try:
+        deleted = await rocm.delete_rocm_binary()
+    except rocm.BackendOperationBusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     if not deleted:
         raise HTTPException(status_code=404, detail="No ROCm backend found to delete")
 
