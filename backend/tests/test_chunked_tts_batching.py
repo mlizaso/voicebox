@@ -58,6 +58,27 @@ async def test_generate_text_batch_preserves_order_and_per_unit_seeds():
 
 
 @pytest.mark.asyncio
+async def test_generate_text_batch_rejects_an_empty_unit_with_its_text_context():
+    class Backend(_BatchBackend):
+        async def generate_batch(self, *_args, **_kwargs):
+            return [
+                (np.ones(2, dtype=np.float32), 24_000),
+                (np.empty(0, dtype=np.float32), 24_000),
+            ]
+
+    with pytest.raises(
+        chunked_tts.GeneratedAudioEmptyError,
+        match=r"no audio frames.*\[\u2026\]\.",
+    ):
+        await chunked_tts.generate_text_batch(
+            Backend(),
+            ["spoken words", "[…]."],
+            {},
+            seeds=[100, 101],
+        )
+
+
+@pytest.mark.asyncio
 async def test_not_implemented_batch_falls_back_to_serial_generation():
     class Backend(_BatchBackend):
         async def generate_batch(self, *_args, **_kwargs):

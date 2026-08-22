@@ -31,6 +31,19 @@ class _ChunkBackend:
         return next(self._chunks), 24_000
 
 
+@pytest.mark.asyncio
+async def test_single_shot_generation_rejects_empty_audio_with_input_context():
+    with pytest.raises(
+        chunked_tts.GeneratedAudioEmptyError,
+        match=r"no audio frames.*\[\u2026\]\.",
+    ):
+        await chunked_tts.generate_chunked(
+            _ChunkBackend([np.empty(0, dtype=np.float32)]),
+            "[…].",
+            {},
+        )
+
+
 def _configure_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data_dir = tmp_path / "data"
     monkeypatch.setattr(config, "_data_dir", data_dir)
@@ -47,7 +60,7 @@ async def test_chunked_generation_disk_output_is_byte_identical_to_legacy(
 ):
     _configure_storage(tmp_path, monkeypatch)
     rng = np.random.default_rng(20260815)
-    chunks = [rng.standard_normal(length).astype(np.float32) for length in (1700, 0, 1001, 3000, 2400, 1, 997)]
+    chunks = [rng.standard_normal(length).astype(np.float32) for length in (1700, 701, 1001, 3000, 2400, 1, 997)]
     monkeypatch.setattr(
         chunked_tts,
         "split_text_into_chunks",

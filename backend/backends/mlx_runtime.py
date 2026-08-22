@@ -75,7 +75,7 @@ MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS: Mapping[str, str] = MappingProxyType
         # AST fingerprints ignore comments, whitespace, and source locations,
         # while changing whenever executable source structure changes.  CI
         # verifies these embedded values before PyInstaller removes sources.
-        "voicebox-mlx": "a2e85c2f49f79794eb2ed2c976f222a6a29da4f670cc8567ccb46a7fcc26e5d9",
+        "voicebox-mlx": "e67ef015787e7ca026c77e08907d6cf359fac62ae64e23a76d036e4c43947c98",
         "mlx-audio-qwen3-tts": "ea2aaa5de132f381a1a817c8d4bd01c7fb00c431f1323606ef1f9b4394700a7e",
     }
 )

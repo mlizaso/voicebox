@@ -28,8 +28,10 @@ from .base import combine_voice_prompts as _combine_voice_prompts, is_model_cach
 from .mlx_qwen_optimizations import (
     MAX_QWEN_CLONE_BATCH_SIZE,
     apply_qwen_icl_cache_backport,
+    apply_qwen_reference_decode_backport,
     build_reference_cache_key,
     clear_qwen_reference_cache,
+    clear_qwen_reference_decode_handoff,
     generate_qwen_icl_batch,
     has_qwen_icl_cache_backport,
     prepare_reference_conditioning,
@@ -214,6 +216,7 @@ class MLXTTSBackend:
             loaded_model = load(model_path, revision=model_revision)
             backport_applied = _apply_mlx_audio_qwen_dtype_backport(loaded_model, mlx_audio_version)
             optimizations_applied = apply_qwen_icl_cache_backport(loaded_model, mlx_audio_version)
+            decode_applied = apply_qwen_reference_decode_backport(loaded_model, mlx_audio_version)
             is_qwen_model = (
                 getattr(loaded_model, "model_type", None) == _MLX_AUDIO_QWEN_MODEL_TYPE
                 or "qwen" in model_path.casefold()
@@ -234,6 +237,12 @@ class MLXTTSBackend:
                     "ICL conditioning-cache and batch interfaces; refusing to load an "
                     "unverified TTS implementation"
                 )
+            if mlx_audio_version == _MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION and is_qwen_model and not decode_applied:
+                raise RuntimeError(
+                    "mlx-audio 0.4.1 Qwen model does not expose the windowed decoder "
+                    "contract Voicebox's discarded-reference decode requires; refusing "
+                    "to load an unverified TTS implementation"
+                )
             self.model = loaded_model
 
         self._current_model_size = model_size
@@ -242,6 +251,7 @@ class MLXTTSBackend:
 
     def _unload_model_locked(self) -> None:
         if self.model is not None:
+            clear_qwen_reference_decode_handoff(self.model)
             clear_qwen_reference_cache(self.model)
             del self.model
             self.model = None
@@ -357,75 +367,84 @@ class MLXTTSBackend:
 
         def _generate_sync():
             """Run synchronous generation in thread pool."""
-            # MLX generate() returns a generator yielding GenerationResult objects
-            audio_chunks = []
-            sample_rate = 24000
-            lang = LANGUAGE_CODE_TO_NAME.get(language, "auto")
-
-            # Set seed if provided (MLX uses numpy random)
-            if seed is not None:
-                import mlx.core as mx
-
-                np.random.seed(seed)
-                mx.random.seed(seed)
-
-            # Extract voice prompt info
-            ref_audio = voice_prompt.get("ref_audio") or voice_prompt.get("ref_audio_path")
-            ref_text = voice_prompt.get("ref_text", "")
-
-            # Validate that the audio file exists
-            if ref_audio and not Path(ref_audio).exists():
-                raise FileNotFoundError(
-                    "Voice-cloning reference audio is missing; refusing to generate with a "
-                    f"different voice: {ref_audio}"
-                )
-
-            # Inference runs with the process's default HF_HUB_OFFLINE
-            # state. Forcing offline here (previously used to avoid lazy
-            # mlx_audio lookups hanging when the network drops mid-inference,
-            # issue #462) regressed online users because libraries make
-            # legitimate metadata calls during generation.
+            loaded_model = self.model
+            # Never let a failed earlier ICL generation influence this request.
+            clear_qwen_reference_decode_handoff(loaded_model)
             try:
-                if ref_audio:
-                    # Check if generate accepts ref_audio parameter
-                    import inspect
+                # MLX generate() returns a generator yielding GenerationResult objects
+                audio_chunks = []
+                sample_rate = 24000
+                lang = LANGUAGE_CODE_TO_NAME.get(language, "auto")
 
-                    sig = inspect.signature(self.model.generate)
-                    if "ref_audio" in sig.parameters:
-                        model_ref_audio = ref_audio
-                        if has_qwen_icl_cache_backport(self.model):
-                            model_ref_audio = self._prepare_reference_sync(voice_prompt).audio
-                        # Generate with voice cloning
-                        for result in self.model.generate(
-                            text,
-                            ref_audio=model_ref_audio,
-                            ref_text=ref_text,
-                            lang_code=lang,
-                        ):
+                # Set seed if provided (MLX uses numpy random)
+                if seed is not None:
+                    import mlx.core as mx
+
+                    np.random.seed(seed)
+                    mx.random.seed(seed)
+
+                # Extract voice prompt info
+                ref_audio = voice_prompt.get("ref_audio") or voice_prompt.get("ref_audio_path")
+                ref_text = voice_prompt.get("ref_text", "")
+
+                # Validate that the audio file exists
+                if ref_audio and not Path(ref_audio).exists():
+                    raise FileNotFoundError(
+                        "Voice-cloning reference audio is missing; refusing to generate with a "
+                        f"different voice: {ref_audio}"
+                    )
+
+                # Inference runs with the process's default HF_HUB_OFFLINE
+                # state. Forcing offline here (previously used to avoid lazy
+                # mlx_audio lookups hanging when the network drops mid-inference,
+                # issue #462) regressed online users because libraries make
+                # legitimate metadata calls during generation.
+                try:
+                    if ref_audio:
+                        # Check if generate accepts ref_audio parameter
+                        import inspect
+
+                        sig = inspect.signature(loaded_model.generate)
+                        if "ref_audio" in sig.parameters:
+                            model_ref_audio = ref_audio
+                            if has_qwen_icl_cache_backport(loaded_model):
+                                model_ref_audio = self._prepare_reference_sync(voice_prompt).audio
+                            # Generate with voice cloning
+                            for result in loaded_model.generate(
+                                text,
+                                ref_audio=model_ref_audio,
+                                ref_text=ref_text,
+                                lang_code=lang,
+                            ):
+                                audio_chunks.append(np.array(result.audio))
+                                sample_rate = result.sample_rate
+                        else:
+                            raise RuntimeError(
+                                "Loaded MLX model does not support ref_audio; refusing to generate with a generic voice"
+                            )
+                    else:
+                        # No voice prompt, generate normally
+                        for result in loaded_model.generate(text, lang_code=lang):
                             audio_chunks.append(np.array(result.audio))
                             sample_rate = result.sample_rate
-                    else:
-                        raise RuntimeError(
-                            "Loaded MLX model does not support ref_audio; refusing to generate with a generic voice"
-                        )
+                except Exception as e:
+                    if ref_audio:
+                        raise RuntimeError("Voice cloning failed; refusing to generate with a generic voice") from e
+                    raise
+
+                # Concatenate all chunks
+                if audio_chunks:
+                    audio = np.concatenate([np.asarray(chunk, dtype=np.float32) for chunk in audio_chunks])
                 else:
-                    # No voice prompt, generate normally
-                    for result in self.model.generate(text, lang_code=lang):
-                        audio_chunks.append(np.array(result.audio))
-                        sample_rate = result.sample_rate
-            except Exception as e:
-                if ref_audio:
-                    raise RuntimeError("Voice cloning failed; refusing to generate with a generic voice") from e
-                raise
+                    # Fallback: empty audio
+                    audio = np.array([], dtype=np.float32)
 
-            # Concatenate all chunks
-            if audio_chunks:
-                audio = np.concatenate([np.asarray(chunk, dtype=np.float32) for chunk in audio_chunks])
-            else:
-                # Fallback: empty audio
-                audio = np.array([], dtype=np.float32)
-
-            return audio, sample_rate
+                return audio, sample_rate
+            finally:
+                # mlx-audio can return before its decoder on immediate codec EOS.
+                # In that path the one-shot handoff installed during preparation
+                # would otherwise remain armed for an unrelated later decode.
+                clear_qwen_reference_decode_handoff(loaded_model)
 
         requested_model_size = self.model_size
         async with mlx_tts_lifecycle_guard.hold("serial inference"):

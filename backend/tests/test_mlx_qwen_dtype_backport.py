@@ -49,13 +49,32 @@ class _FakeTalker:
         return self.codec_embedding
 
 
+class _FakeWindowedDecoder:
+    """The windowed-decode contract the discarded-reference backport requires."""
+
+    def __call__(self, codes_chunk):
+        return codes_chunk
+
+    def chunked_decode(self, codes, chunk_size: int = 300, left_context_size: int = 25):
+        return codes
+
+
+def _fake_speech_tokenizer():
+    return SimpleNamespace(
+        has_encoder=True,
+        decode=lambda audio_codes: (audio_codes, audio_codes),
+        decoder=_FakeWindowedDecoder(),
+        decode_upsample_rate=1920,
+    )
+
+
 class _FakeQwenModel:
     model_type = "qwen3_tts"
 
     def __init__(self, talker_dtype="bfloat16"):
         self.talker = _FakeTalker(talker_dtype)
         self.config = SimpleNamespace(tts_model_type="base")
-        self.speech_tokenizer = SimpleNamespace(has_encoder=True)
+        self.speech_tokenizer = _fake_speech_tokenizer()
         self.speaker_encoder = SimpleNamespace()
         self.tokenizer = SimpleNamespace()
         self.extract_calls = []

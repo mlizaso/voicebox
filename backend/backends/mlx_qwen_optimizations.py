@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 MLX_AUDIO_QWEN_OPTIMIZATION_VERSION = "0.4.1"
 _CACHE_MARKER = "_voicebox_qwen_icl_cache_v2"
 _REFERENCE_CACHE_ATTR = "_voicebox_qwen_reference_conditioning"
+_REFERENCE_DECODE_MARKER = "_voicebox_qwen_reference_decode_v1"
+_PENDING_REFERENCE_CODES_ATTR = "_voicebox_qwen_pending_reference_codes"
 MAX_QWEN_CLONE_BATCH_SIZE = 2
 MAX_QWEN_REFERENCE_CACHE_ENTRIES = 4
 
@@ -49,6 +51,12 @@ class QwenReferenceConditioning:
 def has_qwen_icl_cache_backport(model: Any) -> bool:
     """Return whether the guarded cache-aware method is installed."""
     return bool(getattr(model, _CACHE_MARKER, False))
+
+
+def clear_qwen_reference_decode_handoff(model: Any) -> None:
+    """Disarm the model-scoped, one-shot reference decode handoff."""
+    if getattr(model, _PENDING_REFERENCE_CODES_ATTR, None) is not None:
+        setattr(model, _PENDING_REFERENCE_CODES_ATTR, None)
 
 
 def build_reference_cache_key(audio_path: str, reference_text: str) -> str:
@@ -140,17 +148,171 @@ def apply_qwen_icl_cache_backport(model: Any, mlx_audio_version: str | None) -> 
     ) -> tuple[Any, Any, Any, Any]:
         conditioning = _find_registered_conditioning(bound_model, ref_audio, ref_text)
         if conditioning is None:
-            return original_prepare(
+            prepared = original_prepare(
                 text=text,
                 ref_audio=ref_audio,
                 ref_text=ref_text,
                 language=language,
             )
-        return _prepare_icl_from_conditioning(bound_model, text, conditioning, language)
+        else:
+            prepared = _prepare_icl_from_conditioning(bound_model, text, conditioning, language)
+        # Hand the reference codes to the decode backport, which uses them to prove
+        # which leading vocoder chunks _generate_icl is about to throw away.
+        setattr(bound_model, _PENDING_REFERENCE_CODES_ATTR, prepared[3])
+        return prepared
 
     model._prepare_icl_generation_inputs = MethodType(prepare_with_cache, model)
     setattr(model, _CACHE_MARKER, True)
     logger.info("Applied mlx-audio %s Qwen ICL conditioning cache backport", mlx_audio_version)
+    return True
+
+
+def apply_qwen_reference_decode_backport(model: Any, mlx_audio_version: str | None) -> bool:
+    """Stop re-vocoding the reference prefix that ICL generation discards.
+
+    mlx-audio 0.4.1's `_generate_icl` prepends the reference codes to the generated
+    codes, decodes the whole sequence, and then cuts the reference back off:
+
+        full_codes = mx.concatenate([ref_codes_t, gen_codes], axis=1)
+        audio, audio_lengths = self.speech_tokenizer.decode(full_codes)
+        audio = audio[cut:]
+
+    With this project's 39.25 s reference that is 491 code frames in front of a ~30
+    frame phrase, so 94% of the codec decode is discarded -- on every phrase of a
+    15,000-phrase audiobook.
+
+    `chunked_decode` splits the sequence into `chunk_size` windows and re-establishes
+    decoder state from `left_context_size` frames at each window, calling the decoder
+    afresh per window.  Windows are therefore independent given their own left
+    context, and any window whose output lies entirely below the caller's cut cannot
+    contribute a single retained sample.  Skipping those windows is exact, not an
+    approximation: the retained samples are bit-for-bit what the stock path produced.
+
+    The skip applies only when the leading frames are provably the reference this
+    generation was conditioned on; anything else falls back to the stock decode.
+    """
+    if mlx_audio_version != MLX_AUDIO_QWEN_OPTIMIZATION_VERSION:
+        return False
+    if getattr(model, _REFERENCE_DECODE_MARKER, False):
+        return True
+    if getattr(model, "model_type", None) != "qwen3_tts":
+        return False
+
+    speech_tokenizer = getattr(model, "speech_tokenizer", None)
+    decoder = getattr(speech_tokenizer, "decoder", None)
+    stock_decode = getattr(speech_tokenizer, "decode", None)
+    chunked_decode = getattr(decoder, "chunked_decode", None)
+    upsample_rate = getattr(speech_tokenizer, "decode_upsample_rate", None)
+    if not callable(stock_decode) or not callable(chunked_decode) or not callable(decoder):
+        logger.warning(
+            "Skipping mlx-audio %s Qwen reference-decode backport: unexpected decoder interface",
+            mlx_audio_version,
+        )
+        return False
+    if not isinstance(upsample_rate, int) or upsample_rate <= 0:
+        logger.warning(
+            "Skipping mlx-audio %s Qwen reference-decode backport: unusable upsample rate",
+            mlx_audio_version,
+        )
+        return False
+
+    # Mirror the pinned windowing exactly rather than assuming its constants.
+    parameters = inspect.signature(chunked_decode).parameters
+    chunk_parameter = parameters.get("chunk_size")
+    context_parameter = parameters.get("left_context_size")
+    if (
+        chunk_parameter is None
+        or context_parameter is None
+        or not isinstance(chunk_parameter.default, int)
+        or not isinstance(context_parameter.default, int)
+        or chunk_parameter.default <= 0
+        or context_parameter.default < 0
+    ):
+        logger.warning(
+            "Skipping mlx-audio %s Qwen reference-decode backport: unexpected windowing contract",
+            mlx_audio_version,
+        )
+        return False
+    chunk_size = chunk_parameter.default
+    left_context_size = context_parameter.default
+
+    # `chunked_decode` renders each window with `self(codes_chunk)`.  Take that exact
+    # bound instance rather than `speech_tokenizer.decoder`: the pinned loader wraps
+    # the decoder in `mx.compile`, and attribute access resolves `chunked_decode` to
+    # the ORIGINAL bound method, so the stock windows run eagerly.  Calling the
+    # compiled wrapper here instead would be a different numerical path -- measured at
+    # ~1e-6 per sample, enough to move PCM16 samples by an LSB.
+    window_decoder = getattr(chunked_decode, "__self__", None)
+    if window_decoder is None or not callable(window_decoder):
+        logger.warning(
+            "Skipping mlx-audio %s Qwen reference-decode backport: unbound window decoder",
+            mlx_audio_version,
+        )
+        return False
+
+    def decode_without_discarded_reference(bound_tokenizer: Any, audio_codes: Any) -> Any:
+        import mlx.core as mx
+
+        # One-shot: a decode that is not this generation's ICL decode must never
+        # inherit a previous generation's reference.
+        pending = getattr(model, _PENDING_REFERENCE_CODES_ATTR, None)
+        clear_qwen_reference_decode_handoff(model)
+
+        audio_lengths = (audio_codes[..., 0] > 0).sum(axis=1) * upsample_rate
+        total_frames = audio_codes.shape[1]
+        if pending is None or audio_codes.ndim != 3 or total_frames <= 0:
+            return stock_decode(audio_codes)
+
+        reference = mx.transpose(pending, (0, 2, 1))
+        reference_frames = reference.shape[1]
+        if reference_frames <= 0 or reference_frames >= total_frames:
+            return stock_decode(audio_codes)
+        if reference.shape[0] != audio_codes.shape[0] or reference.shape[2] != audio_codes.shape[2]:
+            return stock_decode(audio_codes)
+        # Prove the prefix IS the reference before discarding any of its audio.
+        if not bool(mx.array_equal(audio_codes[:, :reference_frames, :], reference)):
+            return stock_decode(audio_codes)
+
+        # Reproduce the caller's cut so a window is skipped only when every sample
+        # it would produce sits below it.
+        full_samples = total_frames * upsample_rate
+        valid_samples = int(audio_lengths[0])
+        effective = valid_samples if 0 < valid_samples < full_samples else full_samples
+        cut = int(reference_frames / total_frames * effective)
+
+        codes = mx.transpose(audio_codes, (0, 2, 1))
+        rendered: list[Any] = []
+        discarded_samples = 0
+        produced_samples = 0
+        start_index = 0
+        while start_index < total_frames:
+            end_index = min(start_index + chunk_size, total_frames)
+            context_size = left_context_size if start_index - left_context_size > 0 else start_index
+            window_samples = (end_index - start_index) * upsample_rate
+            if produced_samples + window_samples <= cut:
+                discarded_samples += window_samples
+            else:
+                window = codes[..., start_index - context_size : end_index]
+                rendered.append(window_decoder(window)[..., context_size * upsample_rate :])
+            produced_samples += window_samples
+            start_index = end_index
+
+        if not rendered:
+            return stock_decode(audio_codes)
+        waveform = mx.concatenate(rendered, axis=-1)
+        if discarded_samples:
+            # Keep the caller's proportional cut arithmetic exact by preserving the
+            # full length; these samples are below the cut and are never read.
+            silence = mx.zeros(
+                waveform.shape[:-1] + (discarded_samples,),  # noqa: RUF005 - keep the attested numerical AST stable
+                dtype=waveform.dtype,
+            )
+            waveform = mx.concatenate([silence, waveform], axis=-1)
+        return waveform.squeeze(1), audio_lengths
+
+    speech_tokenizer.decode = MethodType(decode_without_discarded_reference, speech_tokenizer)
+    setattr(model, _REFERENCE_DECODE_MARKER, True)
+    logger.info("Applied mlx-audio %s Qwen discarded-reference decode backport", mlx_audio_version)
     return True
 
 
@@ -455,7 +617,49 @@ def _clear_generation_cache_if_due(mx: Any, step: int) -> None:
         mx.clear_cache()
 
 
-def generate_qwen_icl_batch(
+def _decode_icl_with_reference(model: Any, full_codes: Any, ref_codes: Any) -> Any:
+    """Arm the one-shot reference decoder for exactly one batch row."""
+    setattr(model, _PENDING_REFERENCE_CODES_ATTR, ref_codes)
+    try:
+        return model.speech_tokenizer.decode(full_codes)
+    finally:
+        clear_qwen_reference_decode_handoff(model)
+
+
+def _decode_qwen_icl_batch_rows(
+    model: Any,
+    generated_codes: Sequence[Sequence[Any]],
+    conditioning: QwenReferenceConditioning,
+    mx: Any,
+) -> list[tuple[int, Any, int]]:
+    """Decode every completed row with its own discarded-reference handoff."""
+    results: list[tuple[int, Any, int]] = []
+    reference_codes = mx.transpose(conditioning.ref_codes, (0, 2, 1))
+    reference_len = conditioning.ref_codes.shape[2]
+    for row_index, row_codes in enumerate(generated_codes):
+        if not row_codes:
+            results.append((row_index, mx.array([], dtype=mx.float32), model.sample_rate))
+            continue
+        generated = mx.stack(row_codes, axis=1)
+        full_codes = mx.concatenate([reference_codes, generated], axis=1)
+        audio, audio_lengths = _decode_icl_with_reference(
+            model,
+            full_codes,
+            conditioning.ref_codes,
+        )
+        audio = audio[0]
+        valid_len = int(audio_lengths[0])
+        if 0 < valid_len < audio.shape[0]:
+            audio = audio[:valid_len]
+        cut = int(reference_len / max(full_codes.shape[1], 1) * audio.shape[0])
+        if 0 < cut < audio.shape[0]:
+            audio = audio[cut:]
+        mx.eval(audio)
+        results.append((row_index, audio, model.sample_rate))
+    return results
+
+
+def _generate_qwen_icl_batch_impl(
     model: Any,
     texts: Sequence[str],
     conditioning: QwenReferenceConditioning,
@@ -489,6 +693,9 @@ def generate_qwen_icl_batch(
     input_embeds, trailing_text_hidden, tts_pad_embed, attention_mask = _prepare_batch_inputs(
         model, texts, conditioning, language
     )
+    # `_prepare_batch_inputs` calls the patched serial preparer once per row. Its
+    # final one-shot handoff is incidental; every row is armed explicitly below.
+    clear_qwen_reference_decode_handoff(model)
     mx.eval(input_embeds, trailing_text_hidden, tts_pad_embed, attention_mask)
     if batch_size == 1:
         attention_mask = None
@@ -591,24 +798,38 @@ def generate_qwen_icl_batch(
         _clear_generation_cache_if_due(mx, _step)
 
     del cache, code_cache, input_embeds, trailing_text_hidden, tts_pad_embed
-    results: list[tuple[int, Any, int]] = []
-    reference_codes = mx.transpose(conditioning.ref_codes, (0, 2, 1))
-    reference_len = conditioning.ref_codes.shape[2]
-    for row_index, row_codes in enumerate(generated_codes):
-        if not row_codes:
-            raise RuntimeError(f"Qwen clone batch produced no codec tokens for row {row_index}")
-        generated = mx.stack(row_codes, axis=1)
-        full_codes = mx.concatenate([reference_codes, generated], axis=1)
-        audio, audio_lengths = model.speech_tokenizer.decode(full_codes)
-        audio = audio[0]
-        valid_len = int(audio_lengths[0])
-        if 0 < valid_len < audio.shape[0]:
-            audio = audio[:valid_len]
-        cut = int(reference_len / max(full_codes.shape[1], 1) * audio.shape[0])
-        if 0 < cut < audio.shape[0]:
-            audio = audio[cut:]
-        mx.eval(audio)
-        results.append((row_index, audio, model.sample_rate))
+    return _decode_qwen_icl_batch_rows(model, generated_codes, conditioning, mx)
 
-    mx.clear_cache()
-    return results
+
+def generate_qwen_icl_batch(
+    model: Any,
+    texts: Sequence[str],
+    conditioning: QwenReferenceConditioning,
+    *,
+    language: str,
+    seeds: Sequence[int],
+    temperature: float = 0.9,
+    max_tokens: int = 4096,
+    top_k: int = 50,
+    top_p: float = 1.0,
+    repetition_penalty: float = 1.5,
+) -> list[tuple[int, Any, int]]:
+    """Generate a clone batch and release every model-scoped handoff on all exits."""
+    import mlx.core as mx
+
+    try:
+        return _generate_qwen_icl_batch_impl(
+            model,
+            texts,
+            conditioning,
+            language=language,
+            seeds=seeds,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
+    finally:
+        clear_qwen_reference_decode_handoff(model)
+        mx.clear_cache()

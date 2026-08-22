@@ -21,6 +21,7 @@ from backend.backends.mlx_qwen_optimizations import (
     clear_qwen_reference_cache,
     prepare_reference_conditioning,
 )
+from backend.utils import chunked_tts
 
 
 class _PatchableModel:
@@ -37,6 +38,48 @@ class _PatchableModel:
     def _prepare_icl_generation_inputs(self, text, ref_audio, ref_text, language="auto"):
         self.original_calls.append((text, ref_audio, ref_text, language))
         return "original", text, ref_audio, ref_text
+
+
+class _SerialHandoffModel(_PatchableModel):
+    def __init__(self, outcome: str):
+        super().__init__()
+        self.outcome = outcome
+
+    def generate(self, text, ref_audio=None, ref_text=None, lang_code=None):
+        self._prepare_icl_generation_inputs(
+            text,
+            ref_audio,
+            ref_text,
+            language=lang_code,
+        )
+        if self.outcome == "error":
+            raise ValueError("clone inference failed")
+        if self.outcome == "empty":
+            return
+        yield SimpleNamespace(
+            audio=np.array([0.25], dtype=np.float32),
+            sample_rate=24000,
+        )
+
+
+def _serial_handoff_scenario(tmp_path, monkeypatch, outcome):
+    model = _SerialHandoffModel(outcome)
+    assert apply_qwen_icl_cache_backport(model, "0.4.1") is True
+    backend = MLXTTSBackend()
+    backend.model = model
+    backend._current_model_size = "1.7B"
+    monkeypatch.setattr(
+        backend,
+        "_prepare_reference_sync",
+        lambda _prompt: SimpleNamespace(audio=object()),
+    )
+    reference = tmp_path / "reference.wav"
+    reference.write_bytes(b"reference")
+    request = (
+        "Texto de prueba.",
+        {"ref_audio": str(reference), "ref_text": "Referencia."},
+    )
+    return backend, model, request
 
 
 def test_reference_cache_key_covers_audio_bytes_and_transcript(tmp_path):
@@ -293,11 +336,68 @@ def test_reference_cache_is_bounded_and_cleared_on_model_unload():
     backend = MLXTTSBackend()
     backend.model = model
     backend._current_model_size = "1.7B"
+    setattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, object())
     backend.unload_model()
 
     assert registry == {}
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
     assert backend.model is None
     assert clear_qwen_reference_cache(model) == 0
+
+
+def test_serial_success_clears_reference_decode_handoff(tmp_path, monkeypatch):
+    backend, model, request = _serial_handoff_scenario(tmp_path, monkeypatch, "success")
+
+    audio, sample_rate = asyncio.run(backend.generate(*request, language="es"))
+
+    np.testing.assert_array_equal(audio, np.array([0.25], dtype=np.float32))
+    assert sample_rate == 24000
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+
+
+def test_serial_immediate_eos_clears_reference_decode_handoff(tmp_path, monkeypatch):
+    backend, model, request = _serial_handoff_scenario(tmp_path, monkeypatch, "empty")
+
+    audio, sample_rate = asyncio.run(backend.generate(*request, language="es"))
+
+    assert audio.shape == (0,)
+    assert sample_rate == 24000
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+
+
+def test_serial_failure_clears_reference_decode_handoff(tmp_path, monkeypatch):
+    backend, model, request = _serial_handoff_scenario(tmp_path, monkeypatch, "error")
+
+    with pytest.raises(RuntimeError, match="refusing to generate with a generic voice") as error:
+        asyncio.run(backend.generate(*request, language="es"))
+
+    assert isinstance(error.value.__cause__, ValueError)
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+
+
+def test_serial_non_clone_generation_clears_inherited_reference_handoff():
+    class _PresetModel:
+        def __init__(self):
+            setattr(self, optimizations._PENDING_REFERENCE_CODES_ATTR, object())
+
+        def generate(self, _text, lang_code=None):
+            assert lang_code == "english"
+            assert getattr(self, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+            yield SimpleNamespace(
+                audio=np.array([0.5], dtype=np.float32),
+                sample_rate=24000,
+            )
+
+    model = _PresetModel()
+    backend = MLXTTSBackend()
+    backend.model = model
+    backend._current_model_size = "1.7B"
+
+    audio, sample_rate = asyncio.run(backend.generate("Test.", {}, language="en"))
+
+    np.testing.assert_array_equal(audio, np.array([0.5], dtype=np.float32))
+    assert sample_rate == 24000
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
 
 
 class _FakeMX:
@@ -644,6 +744,37 @@ def test_generate_batch_preserves_distinct_seeds_and_input_order(monkeypatch):
     )
 
 
+def test_empty_mlx_batch_row_reaches_text_aware_result_guard(monkeypatch):
+    backend = MLXTTSBackend()
+    backend.model = SimpleNamespace()
+    backend._current_model_size = "1.7B"
+    monkeypatch.setattr(backend, "_prepare_reference_sync", lambda _prompt: object())
+    monkeypatch.setattr(
+        mlx_backend,
+        "generate_qwen_icl_batch",
+        lambda *_args, **_kwargs: [
+            (0, np.array([0.1], dtype=np.float32), 24000),
+            (1, np.array([], dtype=np.float32), 24000),
+        ],
+    )
+
+    with pytest.raises(
+        chunked_tts.GeneratedAudioEmptyError,
+        match="second omission marker",
+    ) as error:
+        asyncio.run(
+            chunked_tts.generate_text_batch(
+                backend,
+                ["first spoken phrase", "second omission marker"],
+                {"ref_audio": "voice.wav", "ref_text": "reference"},
+                language="es",
+                seeds=[100, 101],
+            )
+        )
+
+    assert error.value.__cause__ is None
+
+
 def test_cancelled_mlx_inference_finishes_before_serial_queue_starts_next_job(
     monkeypatch,
 ):
@@ -790,3 +921,257 @@ def test_generate_batch_rejects_unsupported_instruction_without_loading_model():
                 instruct="whisper",
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Discarded-reference decode backport
+# ---------------------------------------------------------------------------
+
+
+class _FakeWindowDecoder:
+    """Stands in for the codec decoder, recording the windows it renders."""
+
+    def __init__(self, upsample: int):
+        self.upsample = upsample
+        self.rendered_windows: list[int] = []
+
+    def __call__(self, codes_chunk):
+        import mlx.core as mx
+
+        frames = codes_chunk.shape[-1]
+        self.rendered_windows.append(frames)
+        # Derive output from code CONTENT, not only window length. A wrong slice of
+        # the same shape must not pass the retained-sample identity oracle.
+        return mx.repeat(codes_chunk[:, :1, :].astype(mx.float32), self.upsample, axis=-1)
+
+    def chunked_decode(self, codes, chunk_size: int = 4, left_context_size: int = 1):
+        import mlx.core as mx
+
+        wavs = []
+        start = 0
+        while start < codes.shape[-1]:
+            end = min(start + chunk_size, codes.shape[-1])
+            context = left_context_size if start - left_context_size > 0 else start
+            wavs.append(self(codes[..., start - context : end])[..., context * self.upsample :])
+            start = end
+        return mx.concatenate(wavs, axis=-1)
+
+
+class _FakeSpeechTokenizer:
+    """Mirrors the pinned `decode` exactly so the backport can be compared to it."""
+
+    has_encoder = True
+
+    def __init__(self, upsample: int = 4):
+        self.decode_upsample_rate = upsample
+        self.decoder = _FakeWindowDecoder(upsample)
+        self.stock_decode_calls = 0
+
+    def decode(self, audio_codes):
+        import mlx.core as mx
+
+        self.stock_decode_calls += 1
+        codes = mx.transpose(audio_codes, (0, 2, 1))
+        waveform = self.decoder.chunked_decode(codes).squeeze(1)
+        lengths = (audio_codes[..., 0] > 0).sum(axis=1) * self.decode_upsample_rate
+        return waveform, lengths
+
+
+def _decode_model(upsample: int = 4):
+    model = _PatchableModel()
+    model.speech_tokenizer = _FakeSpeechTokenizer(upsample)
+    return model
+
+
+def _icl_codes(reference_frames: int, generated_frames: int, groups: int = 2):
+    import mlx.core as mx
+
+    reference = mx.full((1, reference_frames, groups), 3, dtype=mx.int32)
+    generated = mx.full((1, generated_frames, groups), 7, dtype=mx.int32)
+    return reference, generated, mx.concatenate([reference, generated], axis=1)
+
+
+def _arm(model, reference):
+    """Hand the backport the reference the way the ICL preparation does."""
+    import mlx.core as mx
+
+    setattr(
+        model,
+        optimizations._PENDING_REFERENCE_CODES_ATTR,
+        mx.transpose(reference, (0, 2, 1)),
+    )
+
+
+def test_reference_decode_backport_requires_the_pinned_version():
+    model = _decode_model()
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.2") is False
+    assert optimizations.apply_qwen_reference_decode_backport(model, None) is False
+
+
+def test_reference_decode_backport_refuses_an_unexpected_windowing_contract():
+    model = _decode_model()
+
+    def chunked_decode(codes):  # no chunk_size / left_context_size contract
+        return codes
+
+    model.speech_tokenizer.decoder.chunked_decode = chunked_decode
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is False
+
+
+def test_reference_decode_skips_only_windows_below_the_cut():
+    import mlx.core as mx
+
+    model = _decode_model()
+    reference, _generated, full_codes = _icl_codes(6, 4)
+
+    stock_waveform, stock_lengths = model.speech_tokenizer.decode(full_codes)
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is True
+
+    model.speech_tokenizer.decoder.rendered_windows.clear()
+    _arm(model, reference)
+    waveform, lengths = model.speech_tokenizer.decode(full_codes)
+
+    # 10 frames at upsample 4 -> 40 samples; the caller cuts at 6/10 * 40 = 24.
+    # The cut crosses the second four-frame window, so only the first is skipped.
+    assert model.speech_tokenizer.decoder.rendered_windows == [5, 3]
+    assert waveform.shape == stock_waveform.shape
+    assert int(lengths[0]) == int(stock_lengths[0])
+    # Every sample the caller keeps is exactly what the stock decode produced.
+    assert mx.array_equal(waveform[..., 24:], stock_waveform[..., 24:])
+
+
+def test_reference_decode_renders_through_the_same_callable_as_chunked_decode():
+    """A compiled decoder wrapper must not become a second numerical path.
+
+    The pinned loader wraps the decoder in `mx.compile`, while `chunked_decode`
+    resolves to the ORIGINAL bound method and renders eagerly. Rendering windows
+    through the wrapper instead moved PCM16 samples by an LSB.
+    """
+
+    class _CompiledWrapper:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.calls = 0
+
+        def __call__(self, codes_chunk):
+            self.calls += 1
+            return self._wrapped(codes_chunk)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    model = _decode_model()
+    eager = model.speech_tokenizer.decoder
+    wrapper = _CompiledWrapper(eager)
+    model.speech_tokenizer.decoder = wrapper
+    reference, _generated, full_codes = _icl_codes(8, 2)
+
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is True
+    eager.rendered_windows.clear()
+    _arm(model, reference)
+    model.speech_tokenizer.decode(full_codes)
+
+    assert eager.rendered_windows == [3]
+    assert wrapper.calls == 0
+
+
+def test_reference_decode_falls_back_when_the_prefix_is_not_the_reference():
+    model = _decode_model()
+    reference, _generated, _full = _icl_codes(8, 2)
+    unrelated, _other, other_full = _icl_codes(8, 2)
+    del unrelated
+
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is True
+    model.speech_tokenizer.stock_decode_calls = 0
+    # Arm with a reference whose frames differ from the codes actually decoded.
+    import mlx.core as mx
+
+    setattr(
+        model,
+        optimizations._PENDING_REFERENCE_CODES_ATTR,
+        mx.transpose(mx.full(reference.shape, 9, dtype=mx.int32), (0, 2, 1)),
+    )
+    model.speech_tokenizer.decode(other_full)
+
+    assert model.speech_tokenizer.stock_decode_calls == 1
+
+
+def test_reference_decode_is_one_shot_and_ignores_unarmed_decodes():
+    model = _decode_model()
+    reference, _generated, full_codes = _icl_codes(8, 2)
+
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is True
+    model.speech_tokenizer.stock_decode_calls = 0
+
+    _arm(model, reference)
+    model.speech_tokenizer.decode(full_codes)
+    assert model.speech_tokenizer.stock_decode_calls == 0
+
+    # A second decode must not inherit the previous generation's reference.
+    model.speech_tokenizer.decode(full_codes)
+    assert model.speech_tokenizer.stock_decode_calls == 1
+
+
+def test_batch_decoder_rearms_discarded_reference_for_every_row():
+    import mlx.core as mx
+
+    model = _decode_model()
+    model.sample_rate = 24000
+    reference, _generated, _full = _icl_codes(6, 4)
+    ref_codes = mx.transpose(reference, (0, 2, 1))
+    rows = [[mx.full((1, 2), value, dtype=mx.int32) for _ in range(4)] for value in (7, 9)]
+    expected = []
+    for row in rows:
+        generated = mx.stack(row, axis=1)
+        full_codes = mx.concatenate([reference, generated], axis=1)
+        waveform, lengths = model.speech_tokenizer.decode(full_codes)
+        waveform = waveform[0]
+        valid_len = int(lengths[0])
+        if 0 < valid_len < waveform.shape[0]:
+            waveform = waveform[:valid_len]
+        cut = int(reference.shape[1] / full_codes.shape[1] * waveform.shape[0])
+        expected.append(waveform[cut:])
+
+    assert optimizations.apply_qwen_reference_decode_backport(model, "0.4.1") is True
+    model.speech_tokenizer.stock_decode_calls = 0
+    conditioning = QwenReferenceConditioning(
+        cache_key="key",
+        ref_text="reference",
+        audio=object(),
+        ref_codes=ref_codes,
+        ref_text_ids=object(),
+        speaker_embedding=object(),
+    )
+    results = optimizations._decode_qwen_icl_batch_rows(model, rows, conditioning, mx)
+
+    assert [index for index, _audio, _rate in results] == [0, 1]
+    assert model.speech_tokenizer.stock_decode_calls == 0
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+    for (_index, actual, rate), wanted in zip(results, expected, strict=True):
+        assert rate == 24000
+        assert mx.array_equal(actual, wanted)
+
+
+def test_batch_wrapper_clears_reference_handoff_and_mlx_cache_on_failure(monkeypatch):
+    fake_core = _fake_mlx_modules(monkeypatch)
+    fake_core.float32 = np.float32
+    clear_calls = []
+    fake_core.clear_cache = lambda: clear_calls.append(True)
+    model = SimpleNamespace()
+
+    def fail(bound_model, *_args, **_kwargs):
+        setattr(bound_model, optimizations._PENDING_REFERENCE_CODES_ATTR, object())
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(optimizations, "_generate_qwen_icl_batch_impl", fail)
+    with pytest.raises(RuntimeError, match="decode failed"):
+        optimizations.generate_qwen_icl_batch(
+            model,
+            ["first", "second"],
+            object(),
+            language="spanish",
+            seeds=[100, 101],
+        )
+
+    assert getattr(model, optimizations._PENDING_REFERENCE_CODES_ATTR, None) is None
+    assert clear_calls == [True]

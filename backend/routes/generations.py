@@ -1115,6 +1115,7 @@ async def _stream_speech_impl(
         run_tts_operation_cancellation_safe,
     )
     from ..utils.chunked_tts import (
+        GeneratedAudioEmptyError,
         GeneratedAudioLimitError,
         GeneratedAudioStorageError,
         release_disk_backed_audio,
@@ -1272,6 +1273,8 @@ async def _stream_speech_impl(
             detail="Generation queue is full; retry after queued work finishes",
             headers={"Retry-After": "1"},
         ) from exc
+    except GeneratedAudioEmptyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except GeneratedAudioLimitError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except GeneratedAudioStorageError as exc:

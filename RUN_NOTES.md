@@ -409,3 +409,121 @@ Implementation and validation result:
   0.60, expressive 0.65, podcast 0.75; natural-pitch remains the 0.50 canonical base.
 - New audiobook selection defaults to natural-pitch. A regression contract verifies the shared base,
   bounded pause scales, and the default selection; the full audiobook suite passes 161/161.
+
+## Audiobook bit-identical speedup continuation (2026-08-22)
+
+### Contract
+
+Resume checkpoint 1 from `voicebox-audiobook-speedup` without re-deriving its measured budget or
+re-litigating rejected optimizations. Preserve the already implemented synchronous streaming route,
+reference-prefix vocoder skip, and cross-variant phrase sharing; close the remaining technical risks
+before treating the speedups as ready.
+
+In scope:
+
+- Re-establish the checkpoint's full Voicebox and audiobook test baselines.
+- Exercise the old exact/history/download route and the new exact-stream route against the real,
+  warm backend, prove their returned WAV bytes match, and measure the actual routing overhead.
+- Root-cause the deterministic zero-frame failure at `ch003/000353` (seed `20261666`) and implement
+  the smallest deterministic recovery that does not weaken voice or runtime identity.
+- Re-run focused and full validation, audit the complete diff, and leave a reviewable commit.
+
+Out of scope:
+
+- Re-running previously rejected batching, chunk-renderer, merged-phrase, deduplication, or talker
+  quantization experiments.
+- Changing the paused job's saved numerical identity or silently discarding its artifacts.
+- Entering the user's administrator password or changing macOS Low Power Mode without them.
+- Starting a full 15,151-phrase production render before the deterministic crash is closed.
+
+### Acceptance checks
+
+1. The live backend advertises the newly attested implementation revision.
+2. Multiple real phrases returned by the old and streaming routes are SHA-256 identical.
+3. Warm interleaved measurements quantify endpoint overhead without model-load bias.
+4. The formerly crashing phrase either generates valid deterministic audio or fails in a durable,
+   explicit way that lets the remaining book continue without changing its seed.
+5. Focused regression tests and both checkpoint full suites add no failures over their documented
+   baselines; touched files pass repository-native lint/format/compile checks.
+6. No tests are skipped, weakened, or silenced to obtain a green result.
+
+### W5 zero-frame root cause and decision
+
+- The exact failed plan entry is chapter 3, phrase 353: the punctuation-only editorial omission
+  marker `[…].`, with its frozen positional seed `20261666` and planned 0.692-second pause. It is
+  the only recognized standalone omission marker among all 15,151 phrases in the saved book.
+- Four persisted generation attempts were independently rechecked in `data/voicebox.db`: all use
+  text `[…].`, seed `20261666`, Qwen 1.7B Spanish, and exact request hash
+  `792f25069a19b52d0c0e6153fe708519fde6fe45d73cd63a55dd7cfdd4bc55dc`; they span the two
+  runtime profile UUIDs from the audiobook variants. Every corresponding WAV is exactly 44 bytes,
+  mono PCM16 at 24 kHz, with zero frames and zero duration.
+- The pinned mlx-audio `_generate_icl` loop checks codec EOS before appending `all_codes` to
+  `generated_codes`; an immediate EOS therefore reaches its `if not generated_codes: return`
+  without calling the speech-tokenizer decoder. Voicebox's MLX adapter then deliberately returns
+  an empty float32 array. This proves the old effects error was downstream detection and rules out
+  the reference-window vocoder optimization as the cause.
+- Treat recognized `[…]`, `[...]`, parenthesized, guillemet, and bare ellipsis markers as silent
+  editorial structure. The renderer writes a valid one-frame PCM16 cache artifact, retains the
+  marker's planned pause, and still consumes its positional seed; all following spoken phrases
+  therefore retain their exact historical seeds. This avoids a pointless model call without
+  suppressing any spoken content.
+- Do not retry with another seed. Voicebox now rejects every genuine zero-frame model result at
+  the `generate_chunked` boundary, before normalization/effects, with a bounded preview of the
+  responsible text. The synchronous route returns this deterministic condition as HTTP 400, so
+  the renderer does not mistake it for a transient backend outage. Any spoken phrase that returns
+  zero frames still fails loudly and durably.
+- The renderer algorithm identity is bumped from `phrased-v2` to `phrased-v4`. Besides the omission
+  marker contract, v4 binds phrase and chapter caches to the ordered reference audio/transcripts,
+  the attested backend implementation revision, and a full canonical SHA-256 phrase identity. This
+  is an explicit semantic cache boundary; the already-required backend revision restart means the
+  paused 854/15,151 job could not exact-resume under the speedup sources in any case.
+- Post-benchmark batch hardening and fail-safe cleanup of the serial decoder's one-shot reference
+  handoff changed the local executable-source attestation once more. The current backend identity
+  is `qwen3-mlx-audio-0.4.1-bf16-b2-icl-v3-runtime-sha256-891f41cb4ee209e972a8faf54263b26f671b730f0a737767520cb0c174ddd268`.
+
+Focused validation so far: the pre-hardening Voicebox slice passed 53/53 with Metal available.
+After the batch and serial-handoff cleanup, the combined touched slice passes 108 model-free tests;
+the five focused decode cases cannot acquire Metal in the restricted sandbox and are not treated
+as product failures. The external full suite last reached 297 passes
+plus the documented pre-existing staging-sweep failure before the final integrity/capacity edits.
+Those later external edits still require their focused and full reruns before commit. The live A/B
+below is the direct real-model evidence for the serial numerical path; the later batch-row fix must
+not be represented as having been part of that earlier benchmark.
+
+### W4 user-only power setting
+
+`pmset -g custom` still reports `lowpowermode 1` for AC power. Changing this requires the user's
+administrator password and remains intentionally unattempted. After the current controlled A/B,
+the user-only action is `sudo pmset -a lowpowermode 0`; the same warm benchmark should then be
+rerun if the absolute throughput gain needs to be quantified.
+
+### Live W1 end-to-end A/B (pre-batch-hardening attested source)
+
+- The backend advertised exact revision
+  `qwen3-mlx-audio-0.4.1-bf16-b2-icl-v3-runtime-sha256-823785445bef20a93db04daab469d99139b0a4685a99adc71d769af5734bdb0c`.
+- After warmup, 20/20 measured old/new route pairs were WAV-byte-identical across three real book
+  phrases. The old route was `/generate/exact` plus history polling and original-version download;
+  the new route was `/generate/stream/exact` with the mandatory explicit empty effects chain.
+- Old-route median was 9.3181037085 seconds; new-route median was 5.9724888745 seconds. The
+  ratio of medians is 1.5601709613x and the paired median saving is 2.0683254375 seconds. Means
+  were 8.6643513457 versus 6.7448648749 seconds, for a paired mean saving of 1.9194864709 seconds.
+- Low Power Mode remained enabled during the benchmark, so these are internally controlled route
+  comparisons rather than claims about the machine's eventual unthrottled absolute throughput.
+- The old route necessarily persisted benchmark history. Cleanup removed only the 21 benchmark
+  generation rows and their 42 version rows/files; post-cleanup queries verified zero matching DB
+  records and zero matching files. The benchmark backend was then stopped cleanly to free Metal
+  for the final validation pass.
+
+### Final integration audit
+
+- Adversarial review found that a bare shared hard link was not an integrity boundary. The pool now
+  uses an atomic per-key slot with `audio.wav` plus SHA-256-attested metadata, validates the slot
+  under a lock, refuses symlinked roots/shards, and treats different valid PCM for one key as an
+  integrity failure rather than silently selecting a winner.
+- Completed local phrase WAVs whose recorded checksum changed are regenerated (or replaced from an
+  attested pool). A trusted pool is preferred over an unauthenticated crash-status local WAV.
+- The remaining external audit is intentionally open: a structurally valid local WAV written in
+  the crash window before its manifest checksum is durable must also be regenerated when no trusted
+  pool exists; HTTP 507 must be fatal instead of entering the transient-backend retry loop; and
+  shared-pool ownership/cleanup is only partially wired. No first commit is ready until those three
+  issues are fixed and the final external validation is rerun.

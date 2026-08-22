@@ -86,6 +86,16 @@ class GeneratedAudioStorageError(RuntimeError):
     """Long-form generation cannot preserve the application's disk reserve."""
 
 
+class GeneratedAudioEmptyError(RuntimeError):
+    """TTS accepted text but returned no audio frames for it."""
+
+
+def _raise_empty_generated_audio(text: str) -> None:
+    compact_text = " ".join(text.split())
+    preview = compact_text if len(compact_text) <= 120 else compact_text[:117] + "..."
+    raise GeneratedAudioEmptyError(f"TTS returned no audio frames for text {preview!r}")
+
+
 def is_disk_backed_audio(audio: object) -> bool:
     """Return whether *audio* owns Voicebox's anonymous long-form storage."""
     return isinstance(audio, np.memmap) and getattr(audio, "_voicebox_disk_backed_audio", False) is True
@@ -515,6 +525,8 @@ async def generate_text_batch(
             _validate_generated_audio_sample_rate(item_sample_rate)
             if audio.ndim != 1:
                 raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
+            if len(audio) == 0:
+                _raise_empty_generated_audio(text)
             if len(audio) > item_sample_rate * MAX_GENERATED_AUDIO_DURATION_SECONDS:
                 raise GeneratedAudioLimitError(
                     f"Generated audio exceeds the {MAX_GENERATED_AUDIO_DURATION_SECONDS // 3600}-hour duration limit"
@@ -546,6 +558,8 @@ async def generate_text_batch(
             _validate_generated_audio_sample_rate(item_sample_rate)
             if audio.ndim != 1:
                 raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
+            if len(audio) == 0:
+                _raise_empty_generated_audio(text)
             if len(audio) > item_sample_rate * MAX_GENERATED_AUDIO_DURATION_SECONDS:
                 raise GeneratedAudioLimitError(
                     f"Generated audio exceeds the {MAX_GENERATED_AUDIO_DURATION_SECONDS // 3600}-hour duration limit"
@@ -638,6 +652,12 @@ async def generate_chunked(
                 instruct,
             ),
         )
+        chunk_audio = np.asarray(chunk_audio, dtype=np.float32)
+        _validate_generated_audio_sample_rate(chunk_sr)
+        if chunk_audio.ndim != 1:
+            raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
+        if len(chunk_audio) == 0:
+            _raise_empty_generated_audio(chunk_text)
 
         if runaway_detector is not None and runaway_detector(chunk_audio, chunk_sr):
             if retry_depth >= MAX_RUNAWAY_RETRIES or len(chunk_text) <= MIN_RUNAWAY_RETRY_CHARS:
@@ -692,7 +712,12 @@ async def generate_chunked(
 
         if trim_fn is not None:
             chunk_audio = trim_fn(chunk_audio, chunk_sr)
-        return np.asarray(chunk_audio, dtype=np.float32), chunk_sr
+        chunk_audio = np.asarray(chunk_audio, dtype=np.float32)
+        if chunk_audio.ndim != 1:
+            raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
+        if len(chunk_audio) == 0:
+            _raise_empty_generated_audio(chunk_text)
+        return chunk_audio, chunk_sr
 
     async def load_or_generate_logical_chunk(
         logical_index: int,

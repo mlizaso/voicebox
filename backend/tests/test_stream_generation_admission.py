@@ -161,6 +161,37 @@ async def test_stream_generation_rejects_full_queue_before_model_work(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stream_generation_reports_zero_frame_model_result_as_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _install_generation_fakes(monkeypatch)
+
+    async def reject_empty_audio(*_args, **_kwargs):
+        raise chunked_tts.GeneratedAudioEmptyError("TTS returned no audio frames for text '[…].'")
+
+    async def run_queued(_generation_id, coro, *, discard_result):
+        assert callable(discard_result)
+        return await coro
+
+    async def effects_must_not_run(*_args, **_kwargs):
+        raise AssertionError("zero-frame audio must be rejected before effects processing")
+
+    monkeypatch.setattr("backend.utils.chunked_tts.generate_chunked", reject_empty_audio)
+    monkeypatch.setattr(generations, "run_queued_generation", run_queued)
+    monkeypatch.setattr(
+        effects_processing,
+        "create_generated_audio_response_file",
+        effects_must_not_run,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await generations._stream_speech_impl(_request(), object(), exact=False)
+
+    assert raised.value.status_code == 400
+    assert raised.value.detail == "TTS returned no audio frames for text '[…].'"
+
+
+@pytest.mark.asyncio
 async def test_stream_generation_releases_disk_audio_when_model_context_exit_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
