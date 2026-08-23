@@ -1115,6 +1115,7 @@ async def _stream_speech_impl(
         run_tts_operation_cancellation_safe,
     )
     from ..utils.chunked_tts import (
+        DeterministicSynthesisError,
         GeneratedAudioEmptyError,
         GeneratedAudioLimitError,
         GeneratedAudioStorageError,
@@ -1290,6 +1291,18 @@ async def _stream_speech_impl(
             headers={"Retry-After": "1"},
         ) from exc
     except effects_processing.EffectsProcessingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DeterministicSynthesisError as exc:
+        # A synthesis fault that is a pure function of (text, seed, frozen voice): a runaway
+        # that did not settle after sub-splitting, a refused clone, inconsistent sample rates.
+        # Retrying reproduces it exactly.  These used to escape to Starlette as a bare 500
+        # "Internal Server Error", which a caller cannot tell apart from a recoverable backend
+        # fault: the audiobook renderer retried each one for its whole outage budget, paying a
+        # full inference every time, and then reported the wrong cause.  The queued route has
+        # always surfaced these as `status=failed` with the real text; 400 restores that
+        # contract here, alongside the deterministic empty-audio and effects failures above.
+        # Deliberately NOT a bare `except RuntimeError`: a model load/release failure is
+        # infrastructure, not a property of the request, and must keep propagating as a 500.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         if generated_file is not None and not handed_to_response:

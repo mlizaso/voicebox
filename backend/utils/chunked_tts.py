@@ -90,6 +90,18 @@ class GeneratedAudioEmptyError(RuntimeError):
     """TTS accepted text but returned no audio frames for it."""
 
 
+class DeterministicSynthesisError(RuntimeError):
+    """Synthesis failed for a reason the same request will hit again.
+
+    A pure function of (text, seed, frozen voice): a runaway that never settled after
+    sub-splitting, a decoder disagreeing with itself about sample rate.  Distinguished from
+    an ordinary backend fault so callers can tell "this request cannot succeed" apart from
+    "the backend is having a bad minute" -- retrying the former only burns another full
+    inference, which over a 15,000-phrase audiobook is the difference between failing in
+    seconds with the real reason and failing minutes later with the wrong one.
+    """
+
+
 def _raise_empty_generated_audio(text: str) -> None:
     compact_text = " ".join(text.split())
     preview = compact_text if len(compact_text) <= 120 else compact_text[:117] + "..."
@@ -567,7 +579,7 @@ async def generate_text_batch(
             if sample_rate is None:
                 sample_rate = item_sample_rate
             elif item_sample_rate != sample_rate:
-                raise RuntimeError(
+                raise DeterministicSynthesisError(
                     f"TTS batch returned inconsistent sample rates: {sample_rate} and {item_sample_rate}"
                 )
             processed.append((audio, item_sample_rate))
@@ -661,7 +673,7 @@ async def generate_chunked(
 
         if runaway_detector is not None and runaway_detector(chunk_audio, chunk_sr):
             if retry_depth >= MAX_RUNAWAY_RETRIES or len(chunk_text) <= MIN_RUNAWAY_RETRY_CHARS:
-                raise RuntimeError("TTS output remained unstable after retrying smaller text chunks")
+                raise DeterministicSynthesisError("TTS output remained unstable after retrying smaller text chunks")
 
             retry_max_chars = max(MIN_RUNAWAY_RETRY_CHARS, len(chunk_text) // 2)
             retry_chunks = split_text_into_chunks(chunk_text, retry_max_chars)
@@ -695,7 +707,7 @@ async def generate_chunked(
                                 crossfade_ms,
                             )
                         elif item_sample_rate != retry_sample_rate:
-                            raise RuntimeError(
+                            raise DeterministicSynthesisError(
                                 f"TTS returned inconsistent sample rates: {retry_sample_rate} and {item_sample_rate}"
                             )
                         assert retry_accumulator is not None
@@ -794,7 +806,9 @@ async def generate_chunked(
                 sample_rate = chunk_sr
                 accumulator = _DiskBackedChunkAccumulator(sample_rate, crossfade_ms)
             elif chunk_sr != sample_rate:
-                raise RuntimeError(f"TTS returned inconsistent sample rates: {sample_rate} and {chunk_sr}")
+                raise DeterministicSynthesisError(
+                    f"TTS returned inconsistent sample rates: {sample_rate} and {chunk_sr}"
+                )
             assert accumulator is not None
             try:
                 accumulator.append(chunk_audio)

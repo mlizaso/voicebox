@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend import backends, config, models
-from backend.backends import mlx_tts_lifecycle
+from backend.backends import mlx_runtime, mlx_tts_lifecycle
 from backend.routes import generations
 from backend.services import effects_processing
 from backend.utils import chunked_tts
@@ -27,11 +27,15 @@ def _request() -> models.GenerationRequest:
     )
 
 
-def _install_generation_fakes(monkeypatch: pytest.MonkeyPatch):
+def _install_generation_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile_effects_chain: str | None = None,
+):
     profile = SimpleNamespace(
         id="profile",
         voice_type="cloned",
-        effects_chain=None,
+        effects_chain=profile_effects_chain,
         default_engine="qwen",
         preset_engine=None,
     )
@@ -280,3 +284,134 @@ async def test_status_stream_closes_every_database_session_before_yield(
     assert active_sessions == 0
     assert poll_sessions_closed == 1
     await response.body_iterator.aclose()
+
+
+# --- the explicit-empty-effects-chain contract -------------------------------------------
+#
+# The audiobook renderer's whole byte-identity claim rests on one distinction: an EXPLICIT
+# empty ``effects_chain`` must suppress the profile's chain, while an ABSENT one must inherit
+# it.  The renderer sends ``"effects_chain": []`` on every phrase precisely so the samples
+# match the pre-effects audio the old polled route handed back.  If the streaming route ever
+# treated empty-list and absent alike, the profile's highpass and gain would be baked into
+# all 15,151 phrases and every byte would change -- silently, because the audio would still
+# be valid, correctly shaped and plausible-sounding.  Nothing tested that before.
+
+
+async def _resolved_effects_chain_for(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: models.GenerationRequest,
+    *,
+    profile_effects_chain: str | None,
+    exact: bool = False,
+) -> list | None:
+    """Run the streaming route and report the chain it actually resolved.
+
+    Exercised on both routes.  The renderer posts to /generate/stream/exact, so testing
+    only the unpinned route would leave the claim resting on the two sharing a code path
+    rather than on that having been checked.
+    """
+    _install_generation_fakes(monkeypatch, profile_effects_chain=profile_effects_chain)
+    if exact:
+        # The renderer really does send the pinned revision, so send it here too rather
+        # than stubbing the check away.
+        request.tts_implementation_revision = mlx_runtime.MLX_QWEN_TTS_IMPLEMENTATION_REVISION
+        monkeypatch.setattr(
+            generations.profiles,
+            "freeze_exact_voice_profile",
+            lambda *a, **k: {"voice_binding_sha256": "binding"},
+        )
+
+        async def _exact_prompt():
+            return {"prompt": "voice"}
+
+        # Voice binding has its own tests; this one is about effects resolution.
+        monkeypatch.setattr(
+            generations.profiles,
+            "create_exact_voice_prompt_from_snapshot",
+            lambda *a, **k: _exact_prompt(),
+        )
+    response_path = tmp_path / "speech.wav"
+    response_path.write_bytes(b"RIFF-effects-contract")
+    seen: list = []
+
+    class GeneratedFile:
+        path = response_path
+
+        def cleanup(self):
+            response_path.unlink(missing_ok=True)
+
+    async def create_response_file(_audio, _sample_rate, effects_chain, _normalize):
+        seen.append(effects_chain)
+        return GeneratedFile()
+
+    async def run_queued(_generation_id, coro, *, discard_result):
+        assert callable(discard_result)
+        return await coro
+
+    monkeypatch.setattr(effects_processing, "create_generated_audio_response_file", create_response_file)
+    monkeypatch.setattr(generations, "run_queued_generation", run_queued)
+
+    await generations._stream_speech_impl(request, SimpleNamespace(close=lambda: None), exact=exact)
+    assert len(seen) == 1
+    return seen[0]
+
+
+@pytest.mark.parametrize("exact", [False, True], ids=["stream", "stream-exact"])
+@pytest.mark.asyncio
+async def test_stream_generation_explicit_empty_effects_chain_suppresses_profile_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exact: bool,
+):
+    request = models.GenerationRequest(
+        profile_id="profile",
+        text="Bounded foreground speech.",
+        engine="qwen",
+        model_size="1.7B",
+        seed=42,
+        effects_chain=[],
+    )
+
+    resolved = await _resolved_effects_chain_for(
+        monkeypatch,
+        tmp_path,
+        request,
+        profile_effects_chain='[{"type": "highpass", "cutoff": 70.0}]',
+        exact=exact,
+    )
+
+    assert resolved == [], (
+        "an explicit empty effects_chain must suppress the profile's chain; inheriting it "
+        "here would silently re-master every audiobook phrase"
+    )
+
+
+@pytest.mark.parametrize("exact", [False, True], ids=["stream", "stream-exact"])
+@pytest.mark.asyncio
+async def test_stream_generation_absent_effects_chain_inherits_profile_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exact: bool,
+):
+    request = models.GenerationRequest(
+        profile_id="profile",
+        text="Bounded foreground speech.",
+        engine="qwen",
+        model_size="1.7B",
+        seed=42,
+    )
+    assert request.effects_chain is None, "the fixture must leave the field genuinely absent"
+
+    resolved = await _resolved_effects_chain_for(
+        monkeypatch,
+        tmp_path,
+        request,
+        profile_effects_chain='[{"type": "highpass", "cutoff": 70.0}]',
+        exact=exact,
+    )
+
+    assert resolved == [{"type": "highpass", "cutoff": 70.0}], (
+        "an absent effects_chain must still inherit the profile's chain; the empty-list "
+        "contract above is only meaningful if these two cases differ"
+    )

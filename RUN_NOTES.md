@@ -527,3 +527,78 @@ rerun if the absolute throughput gain needs to be quantified.
   pool exists; HTTP 507 must be fatal instead of entering the transient-backend retry loop; and
   shared-pool ownership/cleanup is only partially wired. No first commit is ready until those three
   issues are fixed and the final external validation is rerun.
+
+### Closing the three open issues (2026-08-23)
+
+The previous entry ended "No first commit is ready until those three issues are fixed and the
+final external validation is rerun." A 13-agent adversarial audit then re-derived the whole change
+set from the code: six refutation lenses, each paired with an independent skeptic told to refute
+its findings, plus a completeness critic. 39 raw findings, 10 killed by their skeptics, 28
+surviving with an explicit `refuted=false` verdict. O1, O2 and O3 were all confirmed real, and the
+audit added one major the earlier list had missed. All four are now fixed.
+
+- **O1 — an unattested phrase WAV is no longer adopted.** `render_phrased.py` used to accept a
+  local phrase WAV whenever it merely decoded, on the reasoning that the content-addressed
+  filename proves the synthesis inputs. It proves what was *asked for*, not what the bytes are. A
+  phrase interrupted after `_atomic_write_wav` but before its checksum reached the manifest has no
+  attestation, so anything that damaged those bytes afterwards was laundered into a `completed`
+  record carrying a fresh checksum of the damage — and then published to the shared pool, where the
+  sibling variant hard-linked it as trusted. Only the pool, whose slots carry their own SHA-256,
+  may now rescue a phrase the manifest does not vouch for; everything else is re-synthesised.
+- **O2 — the retry classifier no longer treats standing conditions as outages.** `507` matched
+  `500 <= code < 600`, so a full disk cost a full inference per attempt for the whole outage budget
+  and then died behind a "backend unavailable" banner naming the wrong problem; it is now fatal and
+  says so. `http.client.IncompleteRead` is `HTTPException`, not `OSError`, so a body truncated by a
+  backend dying mid-response escaped `gen()` uncaught and killed the render on first occurrence; it
+  is now retried within the same bounded budget. And deterministic synthesis faults reached the
+  client as a bare `500 Internal Server Error` indistinguishable from a recoverable fault: a new
+  `DeterministicSynthesisError` marks the faults that are a pure function of (text, seed, frozen
+  voice), and the streaming route maps it to HTTP 400 with the real message, restoring the contract
+  the queued route always had. Deliberately not a bare `except RuntimeError` — a model load/release
+  failure is infrastructure, not a property of the request, and must keep propagating as a 500. The
+  existing `test_stream_generation_releases_disk_audio_when_model_context_exit_fails` proved that
+  distinction matters: a blanket catch broke it.
+- **O3 — the shared pool has an owner and a way to be reclaimed.** `_require_phrase_pool_owner` had
+  no call site and `PHRASE_POOL_OWNER_MARKER` was never written, so the destructive `rmtree` ran on
+  a derived path with only path-shape checks. Creating a phrased job now stamps its pool, and both
+  removal paths verify the stamp. The guard is strict about a marker naming a *different* job and
+  tolerant of a missing one — a pool is addressed by `out_dir` plus a 32-hex job id, so refusing an
+  unstamped directory would trade a real recurring leak for a collision that cannot happen.
+  `remove()` now reclaims the pool too: it preserves partial WAVs on purpose, but the pool is
+  derived cache nothing can address once the bundle naming it is gone, and its hard links otherwise
+  keep the whole book's phrase audio alive after the visible work directories are deleted. The path
+  recorded at creation is now authoritative instead of being re-derived from two different bases.
+- **C1's backend half is tested.** The byte-identity claim rests on the backend treating an explicit
+  `effects_chain: []` as "no effects" while an *absent* one inherits the profile's chain, and
+  nothing tested it — the claim was backed only by an unreproducible sentence in a commit message.
+  Two tests now pin both halves of that distinction.
+
+Every fix carries a regression test, and each test was mutation-checked by reverting the fix and
+confirming the test fails: 507-fatal, IncompleteRead-retried, IncompleteRead-still-bounded,
+unattested-WAV-regenerated, pool-stamped-at-creation, pool-reclaimed-by-remove, and the
+empty-effects-chain contract all fail without their fix and pass with it. The one exception is
+recorded honestly: `test_unattested_phrase_is_never_published_to_the_shared_pool` passes with and
+without the change, because the pool's existing conflict detector already refuses a mismatched
+publish; it is a characterisation test for that invariant, not a regression test for this fix.
+
+`backend/routes/generations.py` and `backend/utils/chunked_tts.py` are both in
+`MLX_QWEN_TTS_LOCAL_NUMERICAL_SOURCE_PATHS`, so the attestation moved again. The embedded
+fingerprint was updated in the same change and verified to match the live AST computation:
+`voicebox-mlx = 77d741fbddffe8b5ae4b58d9c754de230e97b15dd6a65eff378b2242455f9675`, revision
+`qwen3-mlx-audio-0.4.1-bf16-b2-icl-v3-runtime-sha256-c5f3b9993ee1bf1b5b09f02c4dfd2f9b0ae354073e96a1e5463e82d6ac5d51b8`.
+No saved job is stranded by it: the operator agreed to discard `887308ee5984446ebe60242e39040bf6`,
+whose two voices had both already failed on the `ch003/000353` crash, and it has been removed along
+with its 323 MB of render directories. The progress store is now empty. Those 854 phrases per voice
+would not have been reusable in any case — `synthesis_sha` covers `algorithm`, which went
+`phrased-v2` to `phrased-v4`.
+
+Validation: Voicebox `760 passed, 4 skipped, 1 failed`; audiobook `317 passed, 1 failed`. Both
+failures are the documented pre-existing ones (`test_hf_progress_tracker`, and the staging-sweep
+test the audit separately diagnosed as dead — `run_one` returns at the earlier backend-revision
+gate and never reaches the sweeper). Both suites gained tests and lost none. The audiobook suite
+must be run with the conda interpreter; the `python3` on PATH has no numpy and fails at collection.
+
+Still open and deliberately not done here: the remaining 24 surviving findings are minors and nits
+(pool crash debris, silent `os.link` EXDEV fallback, `F_FULLFSYNC` versus `os.fsync` on Darwin, the
+untested `effective = valid_samples` branch, the dead staging-sweep test), and macOS Low Power Mode
+is still on — `sudo pmset -a lowpowermode 0` needs the operator's password.
