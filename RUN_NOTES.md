@@ -602,3 +602,51 @@ Still open and deliberately not done here: the remaining 24 surviving findings a
 (pool crash debris, silent `os.link` EXDEV fallback, `F_FULLFSYNC` versus `os.fsync` on Darwin, the
 untested `effective = valid_samples` branch, the dead staging-sweep test), and macOS Low Power Mode
 is still on — `sudo pmset -a lowpowermode 0` needs the operator's password.
+
+### Closing F8 and F4, and putting the audiobook workspace under git (2026-08-23)
+
+The completeness critic that had failed on a session limit was relaunched and completed. It
+reported ten findings; each was checked against the code rather than accepted. Its headline "F1
+blocker" — that verified-success cleanup now aborts on an unstamped pool, leaving the audiobook
+suite at 308/2 — is **false**: it sampled the tree during a mutation-testing window, when those
+exact lines had been deliberately reverted to prove the new tests catch regressions.
+`_require_phrase_pool_owner` returns on `FileNotFoundError`, that test passes, and the suite is
+green. Two of its findings were real regressions introduced while fixing O1/O2/O3, and were fixed
+at once: the pool path had lost the containment rule that keeps it inside `out_dir` (the per-voice
+work directories have always had one), and its docstring claimed a property the code did not have.
+
+The two findings left open at the previous checkpoint are now closed.
+
+- **F8 — a pool conflict could delete the only attested copy.** On resume the renderer republishes
+  phrases `phrase_done` has just verified against their recorded SHA-256. `_publish_to_share`
+  answered a conflict by `os.replace`-ing the *source* out of the cache and raising, which for that
+  caller meant destroying the one file this render had vouched for while leaving the suspect pool
+  slot in place — and `PhraseShareIntegrityError` was caught nowhere in production code, so it
+  surfaced as an unhandled traceback with the manifest still claiming the phrase was complete.
+  Publication now takes `source_attested`: unattested bytes are quarantined as before so a retry
+  can adopt the pool's attested copy, attested bytes are kept and the pool is named as the outlier,
+  and the synthesis-branch call records the failure in the manifest before re-raising.
+- **F4 — the capacity estimator's third copy of the sharing identity is correct.**
+  `audiobook_capacity._phrased_synthesis_group` omits `algorithm`, which the renderer's
+  `synthesis_params` includes. That cannot mis-group anything: `RENDER_ALGORITHM_VERSION` is a
+  module constant, identical for every voice in one estimate, so it can never split a group; and a
+  voice with no `synthesis_fingerprint` falls back to `("unique", index)`, which over-budgets. The
+  estimator is exact or conservative, never under-budgeting. The structural risk of two
+  hand-maintained copies is real, so it is now pinned by tests rather than merged: one reads
+  `render_phrased.py` and fails if the renderer's synthesis identity gains or loses a field, and one
+  asserts every field the estimator *can* observe still splits its groups. Merging them would drag
+  numpy, soundfile and ffmpeg into a pure-arithmetic module for no benefit.
+
+Both fixes are mutation-verified: reverting each makes its test fail. Audiobook suite `322 passed,
+1 failed`; Voicebox `762 passed, 4 skipped, 1 failed`. Both failures remain the documented
+pre-existing ones. `ruff check` and `ruff format --check` pass on every touched Voicebox file.
+
+macOS Low Power Mode is now **off for AC power** (`pmset -g live` reports `lowpowermode 0` while
+drawing from AC). The 1.5602x route measurement was taken with it on, so it remains a valid
+internally-controlled comparison; absolute throughput should be better than that benchmark implied.
+
+The audiobook workspace at `ebook/audiobook/voice-profile/build` is now a git repository. It had
+never been under version control — its only safety net was the `<name>.bak-<reason>` convention,
+which is why several generations of `.bak-*` snapshots sit beside the sources. Since ~684 MB of the
+directory is generated research output, `.gitignore` ignores everything by default and names what
+to keep: 356 files, 4.4 MB, all code. The `.bak-*` snapshots stay on disk but out of history.
