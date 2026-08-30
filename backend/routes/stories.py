@@ -1,33 +1,14 @@
 """Story endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from starlette.background import BackgroundTask
-from starlette.types import Receive, Scope, Send
 
 from .. import database, models
-from ..app import safe_content_disposition
 from ..database import get_db
 from ..services import stories
+from ..utils.responses import CleanupFileResponse, safe_content_disposition
 
 router = APIRouter()
-
-
-class _StoryExportFileResponse(FileResponse):
-    """Ensure private export scratch is removed even if the client disconnects."""
-
-    def __init__(self, *args, cleanup, **kwargs):
-        self._cleanup = cleanup
-        super().__init__(*args, background=BackgroundTask(cleanup), **kwargs)
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            # FileResponse normally invokes its background task only after a
-            # successful send. A broken connection can bypass that call.
-            self._cleanup()
 
 
 @router.get("/stories", response_model=list[models.StoryResponse])
@@ -246,7 +227,7 @@ async def export_story_audio(
         filename = f"{safe_name}.wav"
         db.close()
 
-        response = _StoryExportFileResponse(
+        response = CleanupFileResponse(
             audio_export.path,
             media_type="audio/wav",
             headers={"Content-Disposition": safe_content_disposition("attachment", filename)},

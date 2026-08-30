@@ -7,11 +7,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
-from ..app import safe_content_disposition
 from ..database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile, get_db
 from ..services import export_import, history
 from ..services.task_queue import generation_job_is_active
-from ..utils.responses import CleanupFileResponse
+from ..utils.responses import CleanupFileResponse, safe_content_disposition
 from ..utils.upload_limits import UploadSizeLimitError, spool_upload_bounded
 
 router = APIRouter()

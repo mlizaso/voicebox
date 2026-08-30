@@ -1,8 +1,7 @@
 """Regression coverage for version metadata on history detail responses."""
 
-import importlib
+import subprocess
 import sys
-import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,25 +17,31 @@ from backend.database import Base, Generation, GenerationVersion, VoiceProfile, 
 
 
 def _load_history_router():
-    """Import the isolated router without constructing the production app recursively."""
-    installed_app_shim = "backend.app" not in sys.modules
-    route_module = None
-    if installed_app_shim:
-        app_shim = types.ModuleType("backend.app")
-        app_shim.safe_content_disposition = lambda disposition, filename: (  # type: ignore[attr-defined]
-            f'{disposition}; filename="{filename}"'
-        )
-        sys.modules["backend.app"] = app_shim
-    try:
-        route_module = importlib.import_module("backend.routes.history")
-        return route_module.router
-    finally:
-        if installed_app_shim:
-            del sys.modules["backend.app"]
-            sys.modules.pop("backend.routes.history", None)
-            routes_package = sys.modules.get("backend.routes")
-            if route_module is not None and getattr(routes_package, "history", None) is route_module:
-                delattr(routes_package, "history")
+    """Import the router without constructing the production application."""
+    from backend.routes.history import router
+
+    return router
+
+
+def test_http_route_modules_do_not_import_application_composition_root():
+    """Domain routers stay importable without the application composition root."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import backend.routes.history, backend.routes.profiles, backend.routes.stories; "
+                "assert 'backend.app' not in sys.modules"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture

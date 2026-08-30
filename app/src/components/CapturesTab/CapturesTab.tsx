@@ -1,8 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { save } from '@tauri-apps/plugin-dialog';
-import { writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import {
   Captions,
   Check,
@@ -28,6 +25,14 @@ import { CapturePill } from '@/components/CapturePill/CapturePill';
 import { CaptureInlinePlayer } from '@/components/CapturesTab/CaptureInlinePlayer';
 import { DictationReadinessChecklist } from '@/components/CapturesTab/DictationReadinessChecklist';
 import {
+  ListPane,
+  ListPaneHeader,
+  ListPaneScroll,
+  ListPaneSearch,
+  ListPaneTitle,
+  ListPaneTitleRow,
+} from '@/components/ListPane';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -48,16 +53,9 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  ListPane,
-  ListPaneHeader,
-  ListPaneScroll,
-  ListPaneSearch,
-  ListPaneTitle,
-  ListPaneTitleRow,
-} from '@/components/ListPane';
 import { useToast } from '@/components/ui/use-toast';
 import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
+import { bufferResponseBounded } from '@/lib/api/boundedResponse';
 import { apiClient } from '@/lib/api/client';
 import type {
   CaptureListResponse,
@@ -73,10 +71,14 @@ import { useCaptureSettings } from '@/lib/hooks/useSettings';
 import { cn } from '@/lib/utils/cn';
 import { formatAbsoluteDate, formatDate } from '@/lib/utils/format';
 import { displayLabelForKey, modifierSideHint } from '@/lib/utils/keyCodes';
+import { usePlatform } from '@/platform/PlatformContext';
+import type { SavedFile } from '@/platform/types';
 import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
 const CAPTURE_AUDIO_MIME = 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm';
+// Keep aligned with backend/utils/upload_limits.py:AUDIO_UPLOAD_MAX_BYTES.
+const CAPTURE_AUDIO_MAX_BYTES = 100 * 1024 * 1024;
 
 function formatDuration(ms?: number | null): string {
   if (!ms || ms < 0) return '0:00';
@@ -135,6 +137,7 @@ type PlaybackState = 'idle' | 'generating' | 'playing';
 export function CapturesTab() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const platform = usePlatform();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -203,30 +206,26 @@ export function CapturesTab() {
   // the race window between ``setSelectedId(new)`` and the refetched list
   // actually containing the new row.
   useEffect(() => {
-    const unlistens: Promise<UnlistenFn>[] = [];
-    unlistens.push(
-      listen<{ capture: CaptureResponse }>('capture:created', (event) => {
-        const capture = event.payload?.capture;
-        if (capture) {
-          queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
-            if (!prev) return prev;
-            if (prev.items.some((c) => c.id === capture.id)) return prev;
-            return { ...prev, items: [capture, ...prev.items], total: prev.total + 1 };
-          });
-          setSelectedId(capture.id);
-        }
-        queryClient.invalidateQueries({ queryKey: ['captures'] });
-      }),
-    );
-    unlistens.push(
-      listen('capture:updated', () => {
-        queryClient.invalidateQueries({ queryKey: ['captures'] });
-      }),
-    );
+    const unsubscribeCreated = platform.events.subscribe('capture:created', (payload) => {
+      const capture = payload?.capture;
+      if (capture) {
+        queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
+          if (!prev) return prev;
+          if (prev.items.some((c) => c.id === capture.id)) return prev;
+          return { ...prev, items: [capture, ...prev.items], total: prev.total + 1 };
+        });
+        setSelectedId(capture.id);
+      }
+      queryClient.invalidateQueries({ queryKey: ['captures'] });
+    });
+    const unsubscribeUpdated = platform.events.subscribe('capture:updated', () => {
+      queryClient.invalidateQueries({ queryKey: ['captures'] });
+    });
     return () => {
-      for (const p of unlistens) p.then((fn) => fn()).catch(() => {});
+      unsubscribeCreated();
+      unsubscribeUpdated();
     };
-  }, [queryClient]);
+  }, [platform.events, queryClient]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -338,9 +337,10 @@ export function CapturesTab() {
     }
   };
 
-  const exportToastSuccess = (path: string) => {
-    const name = path.split(/[\\/]/).pop() ?? path;
-    toast({ title: t('captures.toast.exportSuccess', { path: name }) });
+  const exportToastResult = ({ displayName, outcome }: SavedFile) => {
+    const key =
+      outcome === 'saved' ? 'captures.toast.exportSuccess' : 'captures.toast.exportStarted';
+    toast({ title: t(key, { path: displayName }) });
   };
 
   const exportToastError = (err: unknown) => {
@@ -354,16 +354,23 @@ export function CapturesTab() {
   const handleExportAudio = async () => {
     if (!selected) return;
     try {
-      const dest = await save({
-        defaultPath: `capture_${selected.id.slice(0, 8)}.wav`,
-        filters: [{ name: 'Audio', extensions: ['wav'] }],
-      });
-      if (!dest) return;
-      const res = await authenticatedFetch(apiClient.getCaptureAudioUrl(selected.id));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      await writeFile(dest, buf);
-      exportToastSuccess(dest);
+      const saved = await platform.filesystem.saveResponse(
+        `capture_${selected.id.slice(0, 8)}.wav`,
+        async () => {
+          const response = await authenticatedFetch(apiClient.getCaptureAudioUrl(selected.id));
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          // Tauri can only write the exact path authorized by its save dialog,
+          // so it cannot create an atomic sibling staging file in JavaScript.
+          // Capture audio is capped at 100 MiB: receive it completely before
+          // the adapter opens/truncates an existing destination.
+          return platform.metadata.isTauri
+            ? bufferResponseBounded(response, CAPTURE_AUDIO_MAX_BYTES)
+            : response;
+        },
+        CAPTURE_AUDIO_MAX_BYTES,
+        [{ name: 'Audio', extensions: ['wav'] }],
+      );
+      if (saved) exportToastResult(saved);
     } catch (err) {
       exportToastError(err);
     }
@@ -377,13 +384,12 @@ export function CapturesTab() {
       return;
     }
     try {
-      const dest = await save({
-        defaultPath: `capture_${selected.id.slice(0, 8)}.txt`,
-        filters: [{ name: 'Text', extensions: ['txt'] }],
-      });
-      if (!dest) return;
-      await writeTextFile(dest, text);
-      exportToastSuccess(dest);
+      const saved = await platform.filesystem.saveFile(
+        `capture_${selected.id.slice(0, 8)}.txt`,
+        new Blob([text], { type: 'text/plain;charset=utf-8' }),
+        [{ name: 'Text', extensions: ['txt'] }],
+      );
+      if (saved) exportToastResult(saved);
     } catch (err) {
       exportToastError(err);
     }
@@ -417,13 +423,12 @@ export function CapturesTab() {
       return;
     }
     try {
-      const dest = await save({
-        defaultPath: `capture_${selected.id.slice(0, 8)}.md`,
-        filters: [{ name: 'Markdown', extensions: ['md'] }],
-      });
-      if (!dest) return;
-      await writeTextFile(dest, buildCaptureMarkdown(selected));
-      exportToastSuccess(dest);
+      const saved = await platform.filesystem.saveFile(
+        `capture_${selected.id.slice(0, 8)}.md`,
+        new Blob([buildCaptureMarkdown(selected)], { type: 'text/markdown;charset=utf-8' }),
+        [{ name: 'Markdown', extensions: ['md'] }],
+      );
+      if (saved) exportToastResult(saved);
     } catch (err) {
       exportToastError(err);
     }

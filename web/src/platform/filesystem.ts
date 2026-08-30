@@ -9,6 +9,7 @@ interface BrowserWritableFile {
 }
 
 interface BrowserFileHandle {
+  name?: string;
   createWritable(): Promise<BrowserWritableFile>;
 }
 
@@ -38,6 +39,7 @@ export const webFilesystem: PlatformFilesystem = {
     a.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
+    return { displayName: filename, outcome: 'download-started' };
   },
 
   async saveResponse(
@@ -56,7 +58,7 @@ export const webFilesystem: PlatformFilesystem = {
       try {
         handle = await pickerWindow.showSaveFilePicker({ suggestedName: filename });
       } catch (error) {
-        if (isAbortError(error)) return;
+        if (isAbortError(error)) return null;
         throw error;
       }
     }
@@ -102,7 +104,7 @@ export const webFilesystem: PlatformFilesystem = {
       } finally {
         reader.releaseLock();
       }
-      return;
+      return { displayName: handle.name || filename, outcome: 'saved' };
     }
 
     // Browsers without the File System Access API cannot stream a fetch body
@@ -139,7 +141,7 @@ export const webFilesystem: PlatformFilesystem = {
     }
 
     const blob = new Blob(chunks, { type: response.headers.get('content-type') || 'audio/wav' });
-    await this.saveFile(filename, blob);
+    return this.saveFile(filename, blob);
   },
 
   async openPath(_path: string) {

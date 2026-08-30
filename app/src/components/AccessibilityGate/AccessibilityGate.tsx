@@ -1,5 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { AlertTriangle, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -26,10 +24,9 @@ export function useAccessibilityPermission() {
   const [checking, setChecking] = useState(false);
 
   const recheck = useCallback(async (): Promise<boolean> => {
-    if (!platform.metadata.isTauri) return true;
     setChecking(true);
     try {
-      const trusted = await invoke<boolean>('check_accessibility_permission');
+      const trusted = await platform.dictation.checkAccessibilityPermission();
       setNeedsPermission(!trusted);
       return trusted;
     } catch (err) {
@@ -38,40 +35,30 @@ export function useAccessibilityPermission() {
     } finally {
       setChecking(false);
     }
-  }, [platform.metadata.isTauri]);
+  }, [platform.dictation]);
 
   useEffect(() => {
-    if (!platform.metadata.isTauri) return;
     recheck();
     const onFocus = () => {
       recheck();
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [platform.metadata.isTauri, recheck]);
+  }, [recheck]);
 
   useEffect(() => {
-    if (!platform.metadata.isTauri) return;
-    let unlisten: UnlistenFn | null = null;
-    listen('system:accessibility-missing', () => {
+    return platform.events.subscribe('system:accessibility-missing', () => {
       setNeedsPermission(true);
-    })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(() => {});
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, [platform.metadata.isTauri]);
+    });
+  }, [platform.events]);
 
   const openSettings = useCallback(async () => {
     try {
-      await invoke('open_accessibility_settings');
+      await platform.dictation.openAccessibilitySettings();
     } catch (err) {
       console.warn('[accessibility] open settings failed:', err);
     }
-  }, []);
+  }, [platform.dictation]);
 
   return { needsPermission, checking, recheck, openSettings };
 }
@@ -103,7 +90,10 @@ export function AccessibilityNotice() {
             {t('captures.permissions.accessibility.title')}
           </p>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            <Trans i18nKey="captures.permissions.accessibility.body" components={{ path: <span /> }} />
+            <Trans
+              i18nKey="captures.permissions.accessibility.body"
+              components={{ path: <span /> }}
+            />
           </p>
           <div className="flex items-center gap-2 pt-1.5">
             <Button size="sm" onClick={openSettings} className="gap-1.5">
@@ -111,7 +101,9 @@ export function AccessibilityNotice() {
               {t('captures.permissions.accessibility.openSettings')}
             </Button>
             <Button variant="outline" size="sm" onClick={handleRecheck} disabled={checking}>
-              {checking ? t('captures.permissions.accessibility.rechecking') : t('captures.permissions.accessibility.recheck')}
+              {checking
+                ? t('captures.permissions.accessibility.rechecking')
+                : t('captures.permissions.accessibility.recheck')}
             </Button>
           </div>
           {stillMissing && !checking && (

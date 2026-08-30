@@ -13,11 +13,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, speak_events as speak_event_bus
 from ..database import MCPClientBinding, get_db
-from ..mcp_server import events as mcp_events
 from ..mcp_server.resolve import resolve_profile
-
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +52,7 @@ async def speak(
 
     binding = None
     if client_id:
-        binding = (
-            db.query(MCPClientBinding)
-            .filter(MCPClientBinding.client_id == client_id)
-            .first()
-        )
+        binding = db.query(MCPClientBinding).filter(MCPClientBinding.client_id == client_id).first()
 
     # Resolve per-client personality default when the caller didn't pin it.
     personality_flag = data.personality
@@ -82,7 +76,7 @@ async def speak(
         db,
     )
 
-    mcp_events.publish(
+    speak_event_bus.publish(
         "speak-start",
         {
             "generation_id": getattr(generation, "id", None),

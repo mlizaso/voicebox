@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
-import type { PlatformLifecycle, ServerLogEntry } from '@/platform/types';
+import { emit } from '@tauri-apps/api/event';
+import type { PlatformLifecycle, ServerCloseState, ServerLogEntry } from '@/platform/types';
+import { subscribeToTauriEvent } from './listener';
 
 class TauriLifecycle implements PlatformLifecycle {
   onServerReady?: () => void;
@@ -66,64 +67,30 @@ class TauriLifecycle implements PlatformLifecycle {
     }
   }
 
-  async setupWindowCloseHandler(): Promise<void> {
-    try {
-      // Listen for window close request from Rust
-      await listen<null>('window-close-requested', async () => {
-        // Import store here to avoid circular dependency
-        const { useServerStore } = await import('@/stores/serverStore');
-        const keepRunning = useServerStore.getState().keepServerRunningOnClose;
+  subscribeToWindowClose(getState: () => ServerCloseState): () => void {
+    return subscribeToTauriEvent<null>('window-close-requested', async () => {
+      const { keepServerRunning, serverStartedByApp } = getState();
 
-        // Check if server was started by this app instance
-        // @ts-expect-error - accessing module-level variable from another module
-        const serverStartedByApp = window.__voiceboxServerStartedByApp ?? false;
+      console.log(
+        '[lifecycle] window-close-requested: keepRunning=%s, serverStartedByApp=%s',
+        keepServerRunning,
+        serverStartedByApp,
+      );
 
-        console.log(
-          '[lifecycle] window-close-requested: keepRunning=%s, serverStartedByApp=%s',
-          keepRunning,
-          serverStartedByApp,
-        );
-
-        if (!keepRunning && serverStartedByApp) {
-          // Stop server before closing (only if we started it)
-          try {
-            await this.stopServer();
-          } catch (error) {
-            console.error('Failed to stop server on close:', error);
-          }
+      if (!keepServerRunning && serverStartedByApp) {
+        try {
+          await this.stopServer();
+        } catch (error) {
+          console.error('Failed to stop server on close:', error);
         }
+      }
 
-        // Emit event back to Rust to allow close
-        await emit('window-close-allowed');
-      });
-    } catch (error) {
-      console.error('Failed to setup window close handler:', error);
-    }
+      await emit('window-close-allowed');
+    });
   }
 
   subscribeToServerLogs(callback: (entry: ServerLogEntry) => void): () => void {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-
-    void listen<ServerLogEntry>('server-log', (event) => {
-      callback(event.payload);
-    })
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch((error) => {
-        console.error('Failed to subscribe to server logs:', error);
-      });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-      unlisten = null;
-    };
+    return subscribeToTauriEvent('server-log', callback);
   }
 }
 

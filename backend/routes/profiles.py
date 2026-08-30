@@ -11,12 +11,11 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import config, models
-from ..app import safe_content_disposition
 from ..database import VoiceProfile as DBVoiceProfile, get_db
 from ..services import channels, export_import, history, personality, profiles
 from ..services.profiles import _profile_to_response
 from ..utils.images import MAX_FILE_SIZE as AVATAR_MAX_FILE_SIZE
-from ..utils.responses import CleanupFileResponse
+from ..utils.responses import CleanupFileResponse, safe_content_disposition
 from ..utils.upload_limits import UploadSizeLimitError, spool_upload_bounded
 
 logger = logging.getLogger(__name__)

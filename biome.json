@@ -35,6 +35,28 @@
       }
     }
   },
+  "overrides": [
+    {
+      "includes": ["app/src/**/*.ts", "app/src/**/*.tsx"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**"],
+                    "message": "Shared app code must use the Platform contract instead of Tauri APIs."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "javascript": {
     "formatter": {
       "quoteStyle": "single",

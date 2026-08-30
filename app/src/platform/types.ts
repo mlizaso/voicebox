@@ -1,3 +1,5 @@
+import type { CaptureResponse } from '@/lib/api/types';
+
 /**
  * Platform abstraction types
  * These interfaces define the contract that platform implementations must fulfill
@@ -8,16 +10,69 @@ export interface FileFilter {
   extensions: string[];
 }
 
+export interface SavedFile {
+  displayName: string;
+  outcome: 'saved' | 'download-started';
+}
+
 export interface PlatformFilesystem {
-  saveFile(filename: string, blob: Blob, filters?: FileFilter[]): Promise<void>;
+  saveFile(filename: string, blob: Blob, filters?: FileFilter[]): Promise<SavedFile | null>;
   saveResponse(
     filename: string,
     getResponse: () => Promise<Response>,
     maxBytes: number,
     filters?: FileFilter[],
-  ): Promise<void>;
+  ): Promise<SavedFile | null>;
   openPath(path: string): Promise<void>;
   pickDirectory(title: string): Promise<string | null>;
+}
+
+export interface FocusSnapshot {
+  pid: number;
+  bundle_id: string | null;
+  role: string | null;
+}
+
+/** Every cross-window event supported by the shared application layer. */
+export interface PlatformEventMap {
+  'capture:created': { capture: CaptureResponse };
+  'capture:updated': { id: string };
+  'system:accessibility-missing': undefined;
+  'dictate:start': { focus: FocusSnapshot | null };
+  'dictate:stop': undefined;
+  'dictate:restart': undefined;
+  'dictate:speak-start': string;
+  'dictate:speak-end': string;
+  'dictate:show': undefined;
+  'dictate:hide': undefined;
+}
+
+export type PlatformEventPayload<K extends keyof PlatformEventMap> =
+  PlatformEventMap[K] extends undefined ? [] : [payload: PlatformEventMap[K]];
+
+export interface PlatformEvents {
+  subscribe<K extends keyof PlatformEventMap>(
+    eventName: K,
+    handler: (payload: PlatformEventMap[K]) => void,
+  ): () => void;
+  emit<K extends keyof PlatformEventMap>(
+    eventName: K,
+    ...payload: PlatformEventPayload<K>
+  ): Promise<void>;
+}
+
+export interface HotkeyBindings {
+  pushToTalk: string[];
+  toggleToTalk: string[];
+}
+
+export interface PlatformDictation {
+  setHotkeysEnabled(enabled: boolean, bindings: HotkeyBindings): Promise<void>;
+  checkAccessibilityPermission(): Promise<boolean>;
+  openAccessibilitySettings(): Promise<void>;
+  checkInputMonitoringPermission(): Promise<boolean>;
+  openInputMonitoringSettings(): Promise<void>;
+  pasteFinalText(text: string, focus: FocusSnapshot): Promise<boolean>;
 }
 
 export interface UpdateStatus {
@@ -61,6 +116,11 @@ export interface ServerLogEntry {
   line: string;
 }
 
+export interface ServerCloseState {
+  keepServerRunning: boolean;
+  serverStartedByApp: boolean;
+}
+
 export interface PlatformLifecycle {
   startServer(
     remote?: boolean,
@@ -71,7 +131,7 @@ export interface PlatformLifecycle {
   restartServer(modelsDir?: string | null): Promise<string>;
   setKeepServerRunning(keep: boolean): Promise<void>;
   setBackendOverride(backend?: string | null): Promise<void>;
-  setupWindowCloseHandler(): Promise<void>;
+  subscribeToWindowClose(getState: () => ServerCloseState): () => void;
   subscribeToServerLogs(callback: (entry: ServerLogEntry) => void): () => void;
   onServerReady?: () => void;
 }
@@ -83,6 +143,8 @@ export interface PlatformMetadata {
 
 export interface Platform {
   filesystem: PlatformFilesystem;
+  events: PlatformEvents;
+  dictation: PlatformDictation;
   updater: PlatformUpdater;
   audio: PlatformAudio;
   lifecycle: PlatformLifecycle;

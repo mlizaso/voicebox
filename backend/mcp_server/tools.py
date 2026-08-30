@@ -17,12 +17,11 @@ from typing import Any, Literal
 import librosa
 from fastmcp import FastMCP
 
-from .. import models
+from .. import models, speak_events as mcp_events
 from ..backends.mlx_tts_lifecycle import run_blocking_operation_cancellation_safe
 from ..database import get_db
 from ..services import captures as captures_service, profiles as profiles_service
 from ..utils.upload_limits import AUDIO_UPLOAD_MAX_DURATION_SECONDS
-from . import events as mcp_events
 from .context import current_client_id, request_is_loopback
 from .resolve import resolve_profile
 

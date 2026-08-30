@@ -350,6 +350,8 @@ def build_server(cuda=False, rocm=False):
             "backend.mcp_server.resolve",
             "--hidden-import",
             "backend.mcp_server.events",
+            "--hidden-import",
+            "backend.speak_events",
             "--collect-all",
             "fastmcp",
             "--collect-all",

@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { useEffect } from 'react';
 import { useDictationReadiness } from '@/lib/hooks/useDictationReadiness';
 import { useCaptureSettings } from '@/lib/hooks/useSettings';
@@ -34,21 +33,12 @@ export function useChordSync() {
   const toggleKeys = settings?.chord_toggle_to_talk_keys;
 
   useEffect(() => {
-    if (!platform.metadata.isTauri) return;
     if (enabled === undefined || !pushKeys || !toggleKeys) return;
     const shouldArm = enabled && canRecord;
-    const command = shouldArm ? 'enable_hotkey' : 'disable_hotkey';
-    const args = shouldArm ? { pushToTalk: pushKeys, toggleToTalk: toggleKeys } : {};
-    invoke(command, args).catch((err) => {
-      console.warn(`[chord-sync] ${command} failed:`, err);
-    });
-  }, [
-    platform.metadata.isTauri,
-    enabled,
-    canRecord,
-    // Stringify so a referentially-new array with the same content
-    // doesn't fire a redundant invoke on every settings refetch.
-    pushKeys?.join(','),
-    toggleKeys?.join(','),
-  ]);
+    platform.dictation
+      .setHotkeysEnabled(shouldArm, { pushToTalk: pushKeys, toggleToTalk: toggleKeys })
+      .catch((err) => {
+        console.warn(`[chord-sync] ${shouldArm ? 'enable' : 'disable'} failed:`, err);
+      });
+  }, [platform.dictation, enabled, canRecord, pushKeys, toggleKeys]);
 }

@@ -15,6 +15,9 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Protocol
+
+from .disk_reservations import DiskSpaceReservation, DiskSpaceReservationError, reserve_disk_space
 
 BACKEND_ARCHIVE_MAX_COMPRESSED_BYTES = 8 * 1024**3
 BACKEND_ARCHIVE_MAX_MEMBERS = 100_000
@@ -48,6 +51,19 @@ class _BackendArchiveCancelledError(RuntimeError):
     """Internal cooperative-cancellation signal for the extraction worker."""
 
 
+class BackendArchiveProgress(Protocol):
+    """Progress callback used by backend-specific download adapters."""
+
+    def __call__(
+        self,
+        *,
+        current: int,
+        total: int,
+        filename: str,
+        status: str,
+    ) -> None: ...
+
+
 async def run_blocking_cancellation_safe(function, /, *args, cooperative: bool = False, **kwargs):
     """Run, and on cancellation drain, one filesystem worker operation."""
     cancel_event = threading.Event()
@@ -69,6 +85,180 @@ async def run_blocking_cancellation_safe(function, /, *args, cooperative: bool =
             with suppress(BaseException):
                 operation.result()
         raise cancellation
+
+
+async def download_and_extract_backend_archive(
+    client,
+    *,
+    url: str,
+    sha256_url: str | None,
+    dest_dir: Path,
+    label: str,
+    progress_offset: int,
+    total_size: int,
+    update_progress: BackendArchiveProgress,
+    log_info: Callable[[str], None],
+    storage_reservation: DiskSpaceReservation | None = None,
+    max_compressed_bytes: int = BACKEND_ARCHIVE_MAX_COMPRESSED_BYTES,
+    min_free_bytes: int = BACKEND_ARCHIVE_MIN_FREE_BYTES,
+) -> int:
+    """Download, verify, reserve space for, and extract one backend archive.
+
+    ``dest_dir`` and ``label`` are trusted internal inputs. A supplied disk
+    reservation remains caller-owned and must be active with zero bytes on
+    entry; this helper returns it to zero but never releases it.
+    """
+    temp_path = dest_dir / f".download-{label.replace(' ', '-')}.tmp"
+    owns_reservation = storage_reservation is None
+    try:
+        if storage_reservation is None:
+            storage_reservation = reserve_disk_space(
+                dest_dir,
+                0,
+                min_free_bytes=min_free_bytes,
+            )
+    except DiskSpaceReservationError as exc:
+        raise BackendArchiveError("Insufficient shared capacity for backend download") from exc
+
+    try:
+        # Clean up leftover partial download.
+        with suppress(FileNotFoundError):
+            temp_path.unlink()
+
+        # Fetch the expected checksum before reserving the archive payload.
+        expected_sha = None
+        if sha256_url:
+            try:
+                sha_resp = await client.get(sha256_url)
+                sha_resp.raise_for_status()
+                expected_sha = sha_resp.text.strip().split()[0].casefold()
+                if len(expected_sha) != 64 or any(character not in "0123456789abcdef" for character in expected_sha):
+                    raise ValueError("checksum response does not contain a SHA-256 digest")
+                log_info(f"{label}: expected SHA-256: {expected_sha[:16]}...")
+            except Exception as error:
+                raise RuntimeError(f"{label}: failed to fetch checksum from {sha256_url}") from error
+    except BaseException:
+        if owns_reservation and storage_reservation is not None:
+            storage_reservation.release()
+        raise
+
+    # Stream download, verify, and extract — always clean up temp file.
+    downloaded = 0
+    try:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            advertised_size = None
+            if content_length is not None:
+                try:
+                    advertised_size = int(content_length)
+                except ValueError as exc:
+                    raise BackendArchiveError(f"{label} returned an invalid Content-Length") from exc
+                if advertised_size < 0 or advertised_size > max_compressed_bytes:
+                    raise BackendArchiveError(
+                        f"{label} exceeds the compressed archive size limit ({max_compressed_bytes} bytes)"
+                    )
+            projected_download_bytes = advertised_size if advertised_size is not None else max_compressed_bytes
+            try:
+                storage_reservation.resize(
+                    projected_download_bytes,
+                    directory=dest_dir,
+                    min_free_bytes=min_free_bytes,
+                )
+            except DiskSpaceReservationError as exc:
+                raise BackendArchiveError("Insufficient shared capacity for backend download") from exc
+
+            open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            open_flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(temp_path, open_flags, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    next_downloaded = downloaded + len(chunk)
+                    if next_downloaded > max_compressed_bytes:
+                        raise BackendArchiveError(
+                            f"{label} exceeds the compressed archive size limit ({max_compressed_bytes} bytes)"
+                        )
+                    if advertised_size is not None and next_downloaded > advertised_size:
+                        raise BackendArchiveError(f"{label} exceeded its advertised download size")
+                    output.write(chunk)
+                    downloaded = next_downloaded
+                    update_progress(
+                        current=progress_offset + downloaded,
+                        total=total_size,
+                        filename=f"Downloading {label}",
+                        status="downloading",
+                    )
+            if advertised_size is not None and downloaded != advertised_size:
+                raise BackendArchiveError(f"{label} did not match its advertised download size")
+
+        if expected_sha:
+            update_progress(
+                current=progress_offset + downloaded,
+                total=total_size,
+                filename=f"Verifying {label}...",
+                status="downloading",
+            )
+            actual = await run_blocking_cancellation_safe(
+                sha256_backend_file,
+                temp_path,
+                cooperative=True,
+            )
+            if actual != expected_sha:
+                raise ValueError(
+                    f"{label} integrity check failed: expected {expected_sha[:16]}..., got {actual[:16]}..."
+                )
+            log_info(f"{label}: integrity verified")
+
+        # Preflight every member before streaming regular files to disk. This
+        # contract is independent of Python's version-specific tar filters.
+        update_progress(
+            current=progress_offset + downloaded,
+            total=total_size,
+            filename=f"Extracting {label}...",
+            status="downloading",
+        )
+        required_extraction_bytes = await run_blocking_cancellation_safe(
+            inspect_backend_tar_archive,
+            temp_path,
+            dest_dir,
+            cooperative=True,
+        )
+        try:
+            storage_reservation.resize(
+                required_extraction_bytes,
+                directory=dest_dir,
+                min_free_bytes=min_free_bytes,
+            )
+        except DiskSpaceReservationError as exc:
+            raise BackendArchiveError("Insufficient shared capacity for backend extraction") from exc
+        await run_blocking_cancellation_safe(
+            extract_backend_tar_archive,
+            temp_path,
+            dest_dir,
+            cooperative=True,
+        )
+        storage_reservation.resize(
+            0,
+            directory=dest_dir,
+            min_free_bytes=min_free_bytes,
+        )
+
+        log_info(f"{label}: extracted to {dest_dir}")
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        finally:
+            if storage_reservation is not None:
+                try:
+                    storage_reservation.resize(
+                        0,
+                        directory=dest_dir,
+                        min_free_bytes=min_free_bytes,
+                    )
+                finally:
+                    if owns_reservation:
+                        storage_reservation.release()
+    return downloaded
 
 
 @dataclass(frozen=True)

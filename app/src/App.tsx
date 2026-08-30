@@ -8,8 +8,8 @@ import { useAutoUpdater } from '@/hooks/useAutoUpdater';
 import { useThemeSync } from '@/hooks/useThemeSync';
 import { apiClient } from '@/lib/api/client';
 import type { HealthResponse } from '@/lib/api/types';
-import { useChordSync } from '@/lib/hooks/useChordSync';
 import { TOP_SAFE_AREA_PADDING } from '@/lib/constants/ui';
+import { useChordSync } from '@/lib/hooks/useChordSync';
 import { cn } from '@/lib/utils/cn';
 import { usePlatform } from '@/platform/PlatformContext';
 import { router } from '@/router';
@@ -77,12 +77,13 @@ const LOADING_MESSAGES = [
 
 function App() {
   useThemeSync();
+  const platform = usePlatform();
 
   // The dictate window runs in a separate Tauri webview that must skip
   // server bootstrap (the main window owns that lifecycle) and render only
   // the floating recording surface. Split into a sibling component so the
   // main app's hooks are not called on the dictate path.
-  if (isDictateView()) {
+  if (platform.metadata.isTauri && isDictateView()) {
     return <DictateWindow />;
   }
   return <MainApp />;
@@ -131,7 +132,15 @@ function MainApp() {
     return unsubscribe;
   }, [platform.lifecycle]);
 
-  // Setup window close handler and auto-start server when running in Tauri (production only)
+  useEffect(() => {
+    if (!platform.metadata.isTauri) return;
+    return platform.lifecycle.subscribeToWindowClose(() => ({
+      keepServerRunning: useServerStore.getState().keepServerRunningOnClose,
+      serverStartedByApp: window.__voiceboxServerStartedByApp ?? false,
+    }));
+  }, [platform.lifecycle, platform.metadata.isTauri]);
+
+  // Auto-start the bundled server when running in Tauri production mode.
   useEffect(() => {
     if (!platform.metadata.isTauri) {
       const serverUrl = getDefaultServerUrl();
@@ -142,12 +151,6 @@ function MainApp() {
       setServerReady(true); // Web assumes server is running
       return;
     }
-
-    // Setup window close handler to check setting and stop server if needed
-    // This works in both dev and prod, but will only stop server if it was started by the app
-    platform.lifecycle.setupWindowCloseHandler().catch((error) => {
-      console.error('Failed to setup window close handler:', error);
-    });
 
     // Only auto-start server in production mode
     // In dev mode, user runs server separately
@@ -226,12 +229,6 @@ function MainApp() {
         }, 120_000);
       });
 
-    // Cleanup: stop server on actual unmount (not StrictMode remount)
-    // Note: Window close is handled separately in Tauri Rust code
-    return () => {
-      // Window close event handles server shutdown based on setting
-      serverStartingRef.current = false;
-    };
     // Empty dependency array - platform is stable from context, only run once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [platform.metadata.isTauri, platform.lifecycle]);

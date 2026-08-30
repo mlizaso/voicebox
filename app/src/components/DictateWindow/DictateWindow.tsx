@@ -1,11 +1,10 @@
-import { invoke } from '@tauri-apps/api/core';
-import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CapturePill } from '@/components/CapturePill/CapturePill';
 import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
-import type { FocusSnapshot } from '@/lib/api/types';
 import { useCaptureRecordingSession } from '@/lib/hooks/useCaptureRecordingSession';
+import { usePlatform } from '@/platform/PlatformContext';
+import type { FocusSnapshot } from '@/platform/types';
 
 /**
  * Floating dictate surface shown in a separate transparent Tauri window.
@@ -23,6 +22,7 @@ import { useCaptureRecordingSession } from '@/lib/hooks/useCaptureRecordingSessi
  *      ``dictate:hide`` so Rust tucks the window away.
  */
 export function DictateWindow() {
+  const platform = usePlatform();
   // Force the host document chrome to be transparent so the Tauri window
   // takes on the pill's own shape.
   useEffect(() => {
@@ -52,16 +52,16 @@ export function DictateWindow() {
       if (!allowAutoPaste) return;
       if (!focus || !text.trim()) return;
       try {
-        await invoke('paste_final_text', { text, focus });
+        await platform.dictation.pasteFinalText(text, focus);
       } catch (err) {
         // Surface accessibility failures to the main window so it can prompt
         // the user to grant permission. Other errors stay swallowed —
         // the transcription still landed in the captures list.
         const msg = err instanceof Error ? err.message : String(err);
         if (/accessibility/i.test(msg)) {
-          emit('system:accessibility-missing').catch(() => {});
+          platform.events.emit('system:accessibility-missing').catch(() => {});
         }
-        console.warn('[dictate] paste_final_text failed:', err);
+        console.warn('[dictate] pasteFinalText failed:', err);
       }
     },
   });
@@ -73,22 +73,18 @@ export function DictateWindow() {
   sessionRef.current = session;
 
   useEffect(() => {
-    const unlistens: Promise<UnlistenFn>[] = [];
-    unlistens.push(
-      listen<{ focus: FocusSnapshot | null }>('dictate:start', (event) => {
-        focusRef.current = event.payload?.focus ?? null;
-        sessionRef.current.startRecording();
-      }),
-    );
-    unlistens.push(
-      listen('dictate:stop', () => {
-        if (sessionRef.current.isRecording) sessionRef.current.stopRecording();
-      }),
-    );
+    const unsubscribeStart = platform.events.subscribe('dictate:start', (payload) => {
+      focusRef.current = payload?.focus ?? null;
+      sessionRef.current.startRecording();
+    });
+    const unsubscribeStop = platform.events.subscribe('dictate:stop', () => {
+      if (sessionRef.current.isRecording) sessionRef.current.stopRecording();
+    });
     return () => {
-      for (const p of unlistens) p.then((fn) => fn()).catch(() => {});
+      unsubscribeStart();
+      unsubscribeStop();
     };
-  }, []);
+  }, [platform.events]);
 
   // --- Agent-speak cycle ---------------------------------------------------
 
@@ -109,148 +105,149 @@ export function DictateWindow() {
   const statusTimeoutRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const clearStatusTimeout = () => {
+  const clearStatusTimeout = useCallback(() => {
     if (statusTimeoutRef.current !== null) {
       window.clearTimeout(statusTimeoutRef.current);
       statusTimeoutRef.current = null;
     }
-  };
+  }, []);
 
-  const dismissSpeak = (id?: string) => {
-    // Guard against a late dismiss targeting a stale cycle (a new speak
-    // already started by the time audio.ended from the previous one fired).
-    if (id && speakingRef.current && speakingRef.current.generationId !== id) return;
-    statusSourceRef.current?.close();
-    statusSourceRef.current = null;
-    clearStatusTimeout();
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = '';
-      audioRef.current = null;
-    }
-    setSpeaking(null);
-  };
+  const dismissSpeak = useCallback(
+    (id?: string) => {
+      // Guard against a late dismiss targeting a stale cycle (a new speak
+      // already started by the time audio.ended from the previous one fired).
+      if (id && speakingRef.current && speakingRef.current.generationId !== id) return;
+      statusSourceRef.current?.close();
+      statusSourceRef.current = null;
+      clearStatusTimeout();
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+        audioRef.current = null;
+      }
+      setSpeaking(null);
+    },
+    [clearStatusTimeout],
+  );
 
-  const startSpeakPlayback = (generationId: string) => {
-    const audio = new Audio();
-    audio.crossOrigin = 'use-credentials';
-    audio.src = apiClient.getAudioUrl(generationId);
-    audio.onended = () => dismissSpeak(generationId);
-    audio.onerror = () => dismissSpeak(generationId);
-    // The pill window stays hidden through the ~1 s generation wait so the
-    // user doesn't see a silent pill. We surface it the moment audio
-    // actually starts playing, and that's also when the elapsed counter
-    // arms.
-    audio.onplaying = () => {
-      emit('dictate:show').catch(() => {});
-      setSpeaking((prev) =>
-        prev && prev.generationId === generationId ? { ...prev, startedAt: Date.now() } : prev,
-      );
-      setSpeakElapsed(0);
-    };
-    audioRef.current = audio;
-    audio.play().catch((err) => {
-      console.warn('[dictate] audio.play failed:', err);
-      dismissSpeak(generationId);
-    });
-  };
+  const startSpeakPlayback = useCallback(
+    (generationId: string) => {
+      const audio = new Audio();
+      audio.crossOrigin = 'use-credentials';
+      audio.src = apiClient.getAudioUrl(generationId);
+      audio.onended = () => dismissSpeak(generationId);
+      audio.onerror = () => dismissSpeak(generationId);
+      // The pill window stays hidden through the ~1 s generation wait so the
+      // user doesn't see a silent pill. We surface it the moment audio
+      // actually starts playing, and that's also when the elapsed counter
+      // arms.
+      audio.onplaying = () => {
+        platform.events.emit('dictate:show').catch(() => {});
+        setSpeaking((prev) =>
+          prev && prev.generationId === generationId ? { ...prev, startedAt: Date.now() } : prev,
+        );
+        setSpeakElapsed(0);
+      };
+      audioRef.current = audio;
+      audio.play().catch((err) => {
+        console.warn('[dictate] audio.play failed:', err);
+        dismissSpeak(generationId);
+      });
+    },
+    [dismissSpeak, platform.events],
+  );
 
   useEffect(() => {
-    const unlistens: Promise<UnlistenFn>[] = [];
-
     // Rust emits the SSE payload as a JSON *string* (not a parsed object);
     // the payload shape for speak-start is
     // {generation_id, profile_name, source, client_id}.
-    unlistens.push(
-      listen<string>('dictate:speak-start', (event) => {
-        let parsed: { generation_id?: string } = {};
-        try {
-          parsed = typeof event.payload === 'string' ? JSON.parse(event.payload) : {};
-        } catch {
-          return;
+    const unsubscribeSpeakStart = platform.events.subscribe('dictate:speak-start', (payload) => {
+      let parsed: { generation_id?: string } = {};
+      try {
+        parsed = typeof payload === 'string' ? JSON.parse(payload) : {};
+      } catch {
+        return;
+      }
+      const id = parsed.generation_id;
+      if (!id) return;
+
+      // Tear down any previous cycle — last speak wins.
+      dismissSpeak();
+
+      setSpeaking({ generationId: id, startedAt: null });
+      setSpeakElapsed(0);
+
+      // Subscribe to this one generation's status. When it completes, the
+      // `/audio/{id}` endpoint will serve the WAV we need to play.
+      const source = authenticatedEventSource(apiClient.getGenerationStatusUrl(id));
+      statusSourceRef.current = source;
+      // Hard cap on how long the pill can sit in the 'speaking' state
+      // without ever hearing back from the backend. Covers the case where
+      // the gen row is deleted mid-flight (SSE 404s and EventSource silently
+      // retries) or the backend goes away while a request is in flight.
+      // Clears as soon as a real status event lands.
+      clearStatusTimeout();
+      statusTimeoutRef.current = window.setTimeout(() => {
+        statusTimeoutRef.current = null;
+        if (speakingRef.current?.generationId === id && !audioRef.current) {
+          dismissSpeak(id);
         }
-        const id = parsed.generation_id;
-        if (!id) return;
-
-        // Tear down any previous cycle — last speak wins.
-        dismissSpeak();
-
-        setSpeaking({ generationId: id, startedAt: null });
-        setSpeakElapsed(0);
-
-        // Subscribe to this one generation's status. When it completes, the
-        // `/audio/{id}` endpoint will serve the WAV we need to play.
-        const source = authenticatedEventSource(apiClient.getGenerationStatusUrl(id));
-        statusSourceRef.current = source;
-        // Hard cap on how long the pill can sit in the 'speaking' state
-        // without ever hearing back from the backend. Covers the case where
-        // the gen row is deleted mid-flight (SSE 404s and EventSource silently
-        // retries) or the backend goes away while a request is in flight.
-        // Clears as soon as a real status event lands.
-        clearStatusTimeout();
-        statusTimeoutRef.current = window.setTimeout(() => {
-          statusTimeoutRef.current = null;
-          if (speakingRef.current?.generationId === id && !audioRef.current) {
+      }, 60_000);
+      source.onmessage = (msg) => {
+        try {
+          const data = JSON.parse(msg.data) as { status?: string };
+          if (data.status === 'completed') {
+            clearStatusTimeout();
+            source.close();
+            if (statusSourceRef.current === source) statusSourceRef.current = null;
+            startSpeakPlayback(id);
+          } else if (data.status === 'failed' || data.status === 'not_found') {
+            clearStatusTimeout();
+            source.close();
             dismissSpeak(id);
           }
-        }, 60_000);
-        source.onmessage = (msg) => {
-          try {
-            const data = JSON.parse(msg.data) as { status?: string };
-            if (data.status === 'completed') {
-              clearStatusTimeout();
-              source.close();
-              if (statusSourceRef.current === source) statusSourceRef.current = null;
-              startSpeakPlayback(id);
-            } else if (data.status === 'failed' || data.status === 'not_found') {
-              clearStatusTimeout();
-              source.close();
-              dismissSpeak(id);
-            }
-          } catch {
-            // heartbeats / junk — ignore.
-          }
-        };
-        source.onerror = () => {
-          // EventSource auto-reconnects on transient drops; the timeout above
-          // is the backstop for the case where it never recovers.
-        };
-      }),
-    );
+        } catch {
+          // heartbeats / junk — ignore.
+        }
+      };
+      source.onerror = () => {
+        // EventSource auto-reconnects on transient drops; the timeout above
+        // is the backstop for the case where it never recovers.
+      };
+    });
 
     // Speak-end from the backend is advisory: the authoritative dismiss is
     // `audio.ended`. But if generation failed or nothing ever triggered
     // playback, a short grace window followed by forced dismiss avoids a
     // stuck-visible pill.
-    unlistens.push(
-      listen<string>('dictate:speak-end', (event) => {
-        let parsed: { generation_id?: string; status?: string } = {};
-        try {
-          parsed = typeof event.payload === 'string' ? JSON.parse(event.payload) : {};
-        } catch {
-          return;
+    const unsubscribeSpeakEnd = platform.events.subscribe('dictate:speak-end', (payload) => {
+      let parsed: { generation_id?: string; status?: string } = {};
+      try {
+        parsed = typeof payload === 'string' ? JSON.parse(payload) : {};
+      } catch {
+        return;
+      }
+      if (parsed.status && parsed.status !== 'completed') {
+        // Failed / cancelled — dismiss immediately.
+        if (parsed.generation_id) dismissSpeak(parsed.generation_id);
+        return;
+      }
+      // Completed: if audio never started (shouldn't happen, but guard),
+      // auto-dismiss after 15 s so the pill never stays forever.
+      const id = parsed.generation_id;
+      window.setTimeout(() => {
+        if (speakingRef.current?.generationId === id && !audioRef.current) {
+          dismissSpeak(id);
         }
-        if (parsed.status && parsed.status !== 'completed') {
-          // Failed / cancelled — dismiss immediately.
-          if (parsed.generation_id) dismissSpeak(parsed.generation_id);
-          return;
-        }
-        // Completed: if audio never started (shouldn't happen, but guard),
-        // auto-dismiss after 15 s so the pill never stays forever.
-        const id = parsed.generation_id;
-        window.setTimeout(() => {
-          if (speakingRef.current?.generationId === id && !audioRef.current) {
-            dismissSpeak(id);
-          }
-        }, 15_000);
-      }),
-    );
+      }, 15_000);
+    });
 
     return () => {
-      for (const p of unlistens) p.then((fn) => fn()).catch(() => {});
+      unsubscribeSpeakStart();
+      unsubscribeSpeakEnd();
       dismissSpeak();
     };
-  }, []);
+  }, [clearStatusTimeout, dismissSpeak, platform.events, startSpeakPlayback]);
 
   // Advance the pill's elapsed-time label while audio is playing. Paused
   // during the pre-playback generation window (startedAt is null) so the
@@ -262,7 +259,7 @@ export function DictateWindow() {
       setSpeakElapsed(Date.now() - anchor);
     }, 250);
     return () => window.clearInterval(iv);
-  }, [speaking?.generationId, speaking?.startedAt]);
+  }, [speaking?.startedAt]);
 
   // --- Effective pill state -----------------------------------------------
 
@@ -276,9 +273,9 @@ export function DictateWindow() {
   // transparent always-on-top windows on macOS.
   useEffect(() => {
     if (effectiveState === 'hidden') {
-      emit('dictate:hide').catch(() => {});
+      platform.events.emit('dictate:hide').catch(() => {});
     }
-  }, [effectiveState]);
+  }, [effectiveState, platform.events]);
 
   return (
     <div

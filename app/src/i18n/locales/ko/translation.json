@@ -89,6 +89,7 @@
       "transcriptCopied": "대본이 복사되었습니다",
       "copyFailed": "복사 실패",
       "exportSuccess": "{{path}}로 내보내기 완료",
+      "exportStarted": "{{path}} 다운로드를 시작했습니다",
       "exportFailed": "내보내기 실패",
       "exportEmpty": "내보낼 내용이 없습니다",
       "shortcutNotArmed": "단축키가 설정되었지만 아직 준비되지 않았습니다",

@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { AlertTriangle, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -21,10 +20,9 @@ export function useInputMonitoringPermission() {
   const [checking, setChecking] = useState(false);
 
   const recheck = useCallback(async (): Promise<boolean> => {
-    if (!platform.metadata.isTauri) return true;
     setChecking(true);
     try {
-      const trusted = await invoke<boolean>('check_input_monitoring_permission');
+      const trusted = await platform.dictation.checkInputMonitoringPermission();
       setNeedsPermission(!trusted);
       return trusted;
     } catch (err) {
@@ -33,25 +31,24 @@ export function useInputMonitoringPermission() {
     } finally {
       setChecking(false);
     }
-  }, [platform.metadata.isTauri]);
+  }, [platform.dictation]);
 
   useEffect(() => {
-    if (!platform.metadata.isTauri) return;
     recheck();
     const onFocus = () => {
       recheck();
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [platform.metadata.isTauri, recheck]);
+  }, [recheck]);
 
   const openSettings = useCallback(async () => {
     try {
-      await invoke('open_input_monitoring_settings');
+      await platform.dictation.openInputMonitoringSettings();
     } catch (err) {
       console.warn('[input-monitoring] open settings failed:', err);
     }
-  }, []);
+  }, [platform.dictation]);
 
   return { needsPermission, checking, recheck, openSettings };
 }
@@ -64,8 +61,7 @@ export function useInputMonitoringPermission() {
  */
 export function InputMonitoringNotice({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation();
-  const { needsPermission, checking, recheck, openSettings } =
-    useInputMonitoringPermission();
+  const { needsPermission, checking, recheck, openSettings } = useInputMonitoringPermission();
   const [stillMissing, setStillMissing] = useState(false);
 
   const handleRecheck = useCallback(async () => {
@@ -85,7 +81,10 @@ export function InputMonitoringNotice({ enabled }: { enabled: boolean }) {
             {t('captures.permissions.inputMonitoring.title')}
           </p>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            <Trans i18nKey="captures.permissions.inputMonitoring.body" components={{ path: <span /> }} />
+            <Trans
+              i18nKey="captures.permissions.inputMonitoring.body"
+              components={{ path: <span /> }}
+            />
           </p>
           <div className="flex items-center gap-2 pt-1.5">
             <Button size="sm" onClick={openSettings} className="gap-1.5">
@@ -93,7 +92,9 @@ export function InputMonitoringNotice({ enabled }: { enabled: boolean }) {
               {t('captures.permissions.inputMonitoring.openSettings')}
             </Button>
             <Button variant="outline" size="sm" onClick={handleRecheck} disabled={checking}>
-              {checking ? t('captures.permissions.inputMonitoring.rechecking') : t('captures.permissions.inputMonitoring.recheck')}
+              {checking
+                ? t('captures.permissions.inputMonitoring.rechecking')
+                : t('captures.permissions.inputMonitoring.recheck')}
             </Button>
           </div>
           {stillMissing && !checking && (

@@ -89,6 +89,7 @@
       "transcriptCopied": "转录已复制",
       "copyFailed": "复制失败",
       "exportSuccess": "已导出到 {{path}}",
+      "exportStarted": "已开始下载 {{path}}",
       "exportFailed": "导出失败",
       "exportEmpty": "无可导出的内容",
       "shortcutNotArmed": "快捷键已开启,但尚未就绪",

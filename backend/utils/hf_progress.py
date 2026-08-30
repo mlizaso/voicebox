@@ -2,19 +2,20 @@
 HuggingFace Hub download progress tracking.
 """
 
-from typing import Optional, Callable
-from contextlib import contextmanager
 import logging
-import threading
 import sys
+import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+MIN_TRACKED_DOWNLOAD_BYTES = 1_000_000
 
 
 class HFProgressTracker:
     """Tracks HuggingFace Hub download progress by intercepting tqdm."""
 
-    def __init__(self, progress_callback: Optional[Callable] = None, filter_non_downloads: bool = False):
+    def __init__(self, progress_callback: Callable | None = None, filter_non_downloads: bool = False):
         self.progress_callback = progress_callback
         self.filter_non_downloads = filter_non_downloads  # Only filter if True
         self._original_tqdm_class = None
@@ -130,9 +131,8 @@ class HFProgressTracker:
                                 return result
 
                             # When model is cached, also filter out generation-related progress
-                            if tracker.filter_non_downloads:
-                                if not self._is_download_progress(filename):
-                                    return result
+                            if tracker.filter_non_downloads and not self._is_download_progress(filename):
+                                return result
 
                             # Update per-file tracking
                             tracker._file_sizes[filename] = total
@@ -145,8 +145,7 @@ class HFProgressTracker:
                             # Only report progress once we have a meaningful total (at least 1MB)
                             # This avoids the "100% at 0MB" issue when small config
                             # files are counted before the real model files
-                            MIN_TOTAL_BYTES = 1_000_000  # 1MB
-                            if tracker._total_size < MIN_TOTAL_BYTES:
+                            if tracker._total_size < MIN_TRACKED_DOWNLOAD_BYTES:
                                 return result
 
                             # Call progress callback
@@ -304,8 +303,7 @@ class HFProgressTracker:
                             # Skip until we have a meaningful total (at least 1MB)
                             # This avoids the "100% at 0MB" issue when small config
                             # files are counted before the real model files
-                            MIN_TOTAL_BYTES = 1_000_000  # 1MB
-                            if total >= MIN_TOTAL_BYTES:
+                            if total >= MIN_TRACKED_DOWNLOAD_BYTES:
                                 tracker._total_downloaded = current
                                 tracker._total_size = total
 
@@ -339,7 +337,7 @@ class HFProgressTracker:
                         tqdm_module.auto.tqdm = self._original_tqdm_auto
 
                     # Restore patched modules
-                    for key, (module, attr_name, original) in self._patched_modules.items():
+                    for _key, (module, attr_name, original) in self._patched_modules.items():
                         try:
                             if module and original:
                                 setattr(module, attr_name, original)

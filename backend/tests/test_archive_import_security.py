@@ -17,9 +17,6 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-# Import the application first so route modules do not enter through their
-# safe_content_disposition dependency while app.py is only partially loaded.
-import backend.app  # noqa: F401
 from backend import config
 from backend.database import Base, Generation, ProfileSample, VoiceProfile
 from backend.routes import history as history_routes, profiles as profile_routes, transcription as transcription_routes

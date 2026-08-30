@@ -1,4 +1,4 @@
-import type { PlatformLifecycle, ServerLogEntry } from '@/platform/types';
+import type { PlatformLifecycle, ServerCloseState, ServerLogEntry } from '@/platform/types';
 import { getDefaultServerUrl } from '@/stores/serverStore';
 
 class WebLifecycle implements PlatformLifecycle {
@@ -32,8 +32,8 @@ class WebLifecycle implements PlatformLifecycle {
     // No-op for web - backend variant is managed externally
   }
 
-  async setupWindowCloseHandler(): Promise<void> {
-    // No-op for web - no window close handling needed
+  subscribeToWindowClose(_getState: () => ServerCloseState): () => void {
+    return () => {};
   }
 
   subscribeToServerLogs(_callback: (_entry: ServerLogEntry) => void): () => void {

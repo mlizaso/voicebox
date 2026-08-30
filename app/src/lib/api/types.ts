@@ -142,17 +142,6 @@ export type Qwen3ModelSize = '0.6B' | '1.7B' | '4B';
 
 export type CaptureSource = 'dictation' | 'recording' | 'file';
 
-/**
- * Snapshot of the accessibility-focused UI element at chord-start. Emitted
- * from Rust as part of the ``dictate:start`` payload so the frontend can
- * pass it back to ``paste_final_text`` once the final text is ready.
- */
-export interface FocusSnapshot {
-  pid: number;
-  bundle_id: string | null;
-  role: string | null;
-}
-
 export interface RefinementFlags {
   smart_cleanup: boolean;
   self_correction: boolean;

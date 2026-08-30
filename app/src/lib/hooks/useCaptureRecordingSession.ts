@@ -1,38 +1,10 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PillState } from '@/components/CapturePill/CapturePill';
 import { apiClient } from '@/lib/api/client';
-import type {
-  CaptureListResponse,
-  CaptureResponse,
-  CaptureSource,
-} from '@/lib/api/types';
+import type { CaptureListResponse, CaptureResponse, CaptureSource } from '@/lib/api/types';
 import { useAudioRecording } from '@/lib/hooks/useAudioRecording';
-
-/**
- * Broadcast to sibling Tauri webviews that the captures list has changed.
- * The main CapturesTab listens, seeds its React Query cache, and focuses the
- * new row, so uploads from the floating dictate window show up live.
- *
- * ``capture:created`` carries the full response so the sibling can seed its
- * cache before the refetch lands — otherwise the selection-guard effect
- * would snap back to ``captures[0]`` in the race window between
- * ``setSelectedId(new)`` and the list actually containing the new row.
- *
- * No-op in web mode — there are no siblings to notify.
- */
-function broadcastCreated(capture: CaptureResponse) {
-  tauriEmit('capture:created', { capture }).catch(() => {
-    /* not running inside Tauri; nothing to sync to */
-  });
-}
-
-function broadcastUpdated(id: string) {
-  tauriEmit('capture:updated', { id }).catch(() => {
-    /* not running inside Tauri; nothing to sync to */
-  });
-}
+import { usePlatform } from '@/platform/PlatformContext';
 
 const REST_FADE_MS = 900;
 // How long the green "Done" pill stays visible after refine (or transcribe,
@@ -68,11 +40,7 @@ export interface UseCaptureRecordingSessionOptions {
    * lands after the user flips the toggle still uses the value the capture
    * was created under.
    */
-  onFinalText?: (
-    text: string,
-    capture: CaptureResponse,
-    allowAutoPaste: boolean,
-  ) => void;
+  onFinalText?: (text: string, capture: CaptureResponse, allowAutoPaste: boolean) => void;
 }
 
 export interface UseCaptureRecordingSessionResult {
@@ -101,6 +69,7 @@ export function useCaptureRecordingSession(
   options: UseCaptureRecordingSessionOptions = {},
 ): UseCaptureRecordingSessionResult {
   const queryClient = useQueryClient();
+  const platform = usePlatform();
   // Every capture setting is resolved server-side. ``stt_model``,
   // ``llm_model`` and refine flags are read from the capture_settings table
   // inside POST /captures and /captures/*/refine, and ``auto_refine`` comes
@@ -190,7 +159,7 @@ export function useCaptureRecordingSession(
     mutationFn: async (captureId: string) => apiClient.refineCapture(captureId, {}),
     onSuccess: (data, captureId) => {
       queryClient.invalidateQueries({ queryKey: ['captures'] });
-      broadcastUpdated(captureId);
+      platform.events.emit('capture:updated', { id: captureId }).catch(() => {});
       if (pillStateRef.current === 'refining') scheduleHidePill();
       const finalText = data.transcript_refined ?? data.transcript_raw;
       if (finalText) {
@@ -212,7 +181,7 @@ export function useCaptureRecordingSession(
         return { ...prev, items: [capture, ...prev.items], total: prev.total + 1 };
       });
       queryClient.invalidateQueries({ queryKey: ['captures'] });
-      broadcastCreated(capture);
+      platform.events.emit('capture:created', { capture }).catch(() => {});
       onCaptureCreatedRef.current?.(capture);
       allowAutoPasteRef.current = capture.allow_auto_paste;
       if (capture.auto_refine) {
@@ -221,11 +190,7 @@ export function useCaptureRecordingSession(
       } else {
         if (pillStateRef.current === 'transcribing') scheduleHidePill();
         if (capture.transcript_raw) {
-          onFinalTextRef.current?.(
-            capture.transcript_raw,
-            capture,
-            capture.allow_auto_paste,
-          );
+          onFinalTextRef.current?.(capture.transcript_raw, capture, capture.allow_auto_paste);
         }
       }
     },
@@ -308,8 +273,7 @@ export function useCaptureRecordingSession(
     [refineMutation],
   );
 
-  const pillElapsedMs =
-    pillState === 'recording' ? Math.round(duration * 1000) : frozenElapsedMs;
+  const pillElapsedMs = pillState === 'recording' ? Math.round(duration * 1000) : frozenElapsedMs;
 
   return {
     pillState,

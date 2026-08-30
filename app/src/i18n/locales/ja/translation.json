@@ -89,6 +89,7 @@
       "transcriptCopied": "文字起こしをコピーしました",
       "copyFailed": "コピーに失敗しました",
       "exportSuccess": "{{path}} に書き出しました",
+      "exportStarted": "{{path}} のダウンロードを開始しました",
       "exportFailed": "書き出しに失敗しました",
       "exportEmpty": "書き出す内容がありません",
       "shortcutNotArmed": "ショートカットは有効ですが、まだ準備が完了していません",

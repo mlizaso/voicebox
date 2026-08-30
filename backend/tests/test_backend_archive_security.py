@@ -47,6 +47,23 @@ class _Client:
         return _Stream(self.response)
 
 
+class _ChecksumResponse:
+    def __init__(self, checksum: str):
+        self.text = checksum
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ChecksumClient(_Client):
+    def __init__(self, content: bytes, checksum: str):
+        super().__init__(content)
+        self.checksum_response = _ChecksumResponse(checksum)
+
+    async def get(self, _url: str) -> _ChecksumResponse:
+        return self.checksum_response
+
+
 class _BlockingResponse(_Response):
     def __init__(self, content: bytes, entered: asyncio.Event):
         super().__init__(content)
@@ -159,6 +176,80 @@ async def test_download_enforces_compressed_archive_limit(
     assert list(destination.iterdir()) == []
 
 
+@pytest.mark.parametrize("service", [cuda, rocm], ids=["cuda", "rocm"])
+@pytest.mark.asyncio
+async def test_checksum_mismatch_cleans_download_and_reservation(
+    service: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(service, "BACKEND_ARCHIVE_MIN_FREE_BYTES", 0)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    disk_reservations._clear_reservations_for_tests()
+    try:
+        with pytest.raises(ValueError, match="integrity check failed"):
+            await service._download_and_extract_archive(
+                _ChecksumClient(_tar_bytes("payload.bin"), "0" * 64),
+                url="https://example.invalid/backend.tar.gz",
+                sha256_url="https://example.invalid/backend.tar.gz.sha256",
+                dest_dir=destination,
+                label="test backend",
+                progress_offset=0,
+                total_size=1,
+            )
+
+        assert list(destination.iterdir()) == []
+        assert disk_reservations.reserved_bytes(destination) == 0
+    finally:
+        disk_reservations._clear_reservations_for_tests()
+
+
+@pytest.mark.parametrize("service", [cuda, rocm], ids=["cuda", "rocm"])
+@pytest.mark.parametrize(
+    ("length_delta", "expected_message"),
+    [
+        (None, "returned an invalid Content-Length"),
+        (-1, "exceeded its advertised download size"),
+        (1, "did not match its advertised download size"),
+    ],
+    ids=["malformed", "too-short", "too-long"],
+)
+@pytest.mark.asyncio
+async def test_content_length_failures_clean_download_and_reservation(
+    service: ModuleType,
+    length_delta: int | None,
+    expected_message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(service, "BACKEND_ARCHIVE_MIN_FREE_BYTES", 0)
+    content = _tar_bytes("payload.bin")
+    client = _Client(content)
+    client.response.headers["content-length"] = (
+        "not-a-number" if length_delta is None else str(len(content) + length_delta)
+    )
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    disk_reservations._clear_reservations_for_tests()
+    try:
+        with pytest.raises(BackendArchiveError, match=expected_message):
+            await service._download_and_extract_archive(
+                client,
+                url="https://example.invalid/backend.tar.gz",
+                sha256_url=None,
+                dest_dir=destination,
+                label="test backend",
+                progress_offset=0,
+                total_size=len(content),
+            )
+
+        assert list(destination.iterdir()) == []
+        assert disk_reservations.reserved_bytes(destination) == 0
+    finally:
+        disk_reservations._clear_reservations_for_tests()
+
+
 def test_extraction_enforces_member_and_total_size_limits(tmp_path: Path):
     archive_path = tmp_path / "backend.tar.gz"
     archive_path.write_bytes(_tar_bytes("payload.bin", payload=b"12345"))
@@ -246,7 +337,7 @@ async def test_cancelled_extraction_is_drained_before_operation_release(
             raise TimeoutError("test did not release extraction")
         real_extract(archive_path, destination, cancel_event=cancel_event)
 
-    monkeypatch.setattr(service, "extract_backend_tar_archive", blocking_extract)
+    monkeypatch.setattr(backend_archive, "extract_backend_tar_archive", blocking_extract)
     destination = service.get_backends_dir() / "staging"
 
     async def download_locked(_version=None):

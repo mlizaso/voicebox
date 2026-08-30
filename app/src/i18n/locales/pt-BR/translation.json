@@ -89,6 +89,7 @@
       "transcriptCopied": "Transcrição copiada",
       "copyFailed": "Falha ao copiar",
       "exportSuccess": "Exportado para {{path}}",
+      "exportStarted": "Download de {{path}} iniciado",
       "exportFailed": "Falha ao exportar",
       "exportEmpty": "Nada para exportar",
       "shortcutNotArmed": "Atalho ligado, mas ainda não armado",

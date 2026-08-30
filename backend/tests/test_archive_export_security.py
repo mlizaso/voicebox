@@ -16,8 +16,6 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Establish the route module's safe-content-disposition dependency first.
-import backend.app  # noqa: F401
 from backend import config
 from backend.database import Base, Generation, GenerationVersion, ProfileSample, VoiceProfile
 from backend.request_limits import MULTIPART_OVERHEAD_BYTES, request_body_limit
@@ -72,8 +70,8 @@ def test_archive_http_import_caps_cover_every_exporter_owned_archive():
     generation_max = export_import.GENERATION_ARCHIVE_MAX_TOTAL_BYTES + export_import.ARCHIVE_EXPORT_OVERHEAD_BYTES
     profile_max = export_import.PROFILE_ARCHIVE_MAX_TOTAL_BYTES + export_import.ARCHIVE_EXPORT_OVERHEAD_BYTES
 
-    assert history_routes.GENERATION_ARCHIVE_MAX_BYTES == generation_max
-    assert profile_routes.PROFILE_ARCHIVE_MAX_BYTES == profile_max
+    assert generation_max == history_routes.GENERATION_ARCHIVE_MAX_BYTES
+    assert profile_max == profile_routes.PROFILE_ARCHIVE_MAX_BYTES
     assert request_body_limit({"method": "POST", "path": "/history/import"}) == (
         generation_max + MULTIPART_OVERHEAD_BYTES
     )

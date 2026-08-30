@@ -32,12 +32,12 @@ python tests/test_real_download.py
 - Server must be running (`python main.py`)
 
 ### `test_progress.py`
-Unit tests for ProgressManager and HFProgressTracker functionality.
+Pytest coverage for `ProgressManager` and `HFProgressTracker` that can also be
+run as a standalone diagnostic from the repository root.
 
 **Usage:**
 ```bash
-cd backend
-python tests/test_progress.py
+python -m backend.tests.test_progress
 ```
 
 ### `test_check_progress_state.py`
@@ -51,7 +51,8 @@ python tests/test_check_progress_state.py
 
 ## Notes
 
-These are manual test scripts, not automated unit tests. They're designed for:
+Most files described here are manual diagnostic scripts; `test_progress.py` is
+also part of the automated pytest suite. They're designed for:
 - Debugging progress tracking issues
 - Validating SSE event streams
 - Monitoring real-time download behavior
