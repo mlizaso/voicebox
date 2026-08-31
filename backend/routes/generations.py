@@ -223,6 +223,30 @@ def _require_exact_seed(data: models.GenerationRequest) -> None:
         )
 
 
+async def _resolve_generation_text(
+    data: models.GenerationRequest,
+    profile,
+    db: Session,
+) -> tuple[str, str]:
+    """Resolve the text and source shared by durable and streaming generation."""
+    profile_personality = getattr(profile, "personality", None)
+    if not data.personality or not profile_personality:
+        return data.text, "manual"
+
+    close_request_db = getattr(db, "close", None)
+    if callable(close_request_db):
+        close_request_db()
+    try:
+        llm_result = await personality.rewrite_as_profile(profile_personality, data.text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    text = llm_result.text.strip()
+    if not text:
+        raise HTTPException(status_code=500, detail="LLM produced empty output; nothing to speak.")
+    return text, "personality_speak"
+
+
 async def _generate_speech_impl(
     data: models.GenerationRequest,
     db: Session,
@@ -296,22 +320,10 @@ async def _generate_speech_impl(
         else None
     )
 
-    text = data.text
-    source = "manual"
-    profile_personality = getattr(profile, "personality", None)
-    if data.personality and profile_personality:
-        # Personality inference is serialized with every other local model
-        # operation. Release the profile read transaction before waiting, then
-        # let create_generation acquire a fresh short transaction afterward.
-        db.close()
-        try:
-            llm_result = await personality.rewrite_as_profile(profile_personality, data.text)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        text = llm_result.text.strip()
-        if not text:
-            raise HTTPException(status_code=500, detail="LLM produced empty output; nothing to speak.")
-        source = "personality_speak"
+    # Personality inference is serialized with every other local model
+    # operation. The resolver releases the profile read transaction before
+    # waiting; create_generation acquires a fresh short transaction afterward.
+    text, source = await _resolve_generation_text(data, profile, db)
 
     generation = await history.create_generation(
         profile_id=data.profile_id,
@@ -1174,6 +1186,8 @@ async def _stream_speech_impl(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    text, _source = await _resolve_generation_text(data, profile, db)
+
     # A foreground request may wait behind a long durable audiobook job. End
     # its dependency-session transaction before queueing so the bounded
     # waiter set does not retain SQLite connections or read transactions.
@@ -1229,7 +1243,7 @@ async def _stream_speech_impl(
 
                 audio, sample_rate = await generate_chunked(
                     tts_model,
-                    data.text,
+                    text,
                     voice_prompt,
                     language=data.language,
                     seed=data.seed,

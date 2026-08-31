@@ -93,6 +93,7 @@ def client(tmp_path):
                 label="processed",
                 audio_path="generations/processed.wav",
                 effects_chain='[{"type":"gain","params":{"gain_db":-1.0}}]',
+                source_version_id="version-original",
                 is_default=True,
                 created_at=created + timedelta(seconds=1),
             ),
@@ -136,6 +137,7 @@ def test_history_detail_includes_ordered_versions_and_active_id(client):
             "params": {"gain_db": -1.0},
         }
     ]
+    assert body["versions"][1]["source_version_id"] == "version-original"
     assert body["active_version_id"] == "version-processed"
 
 

@@ -251,6 +251,7 @@ def _get_versions_for_generation(generation_id: str, db: Session) -> tuple:
                 label=v.label,
                 audio_path=v.audio_path,
                 effects_chain=effects_chain,
+                source_version_id=v.source_version_id,
                 is_default=v.is_default,
                 created_at=v.created_at,
             )

@@ -9,17 +9,31 @@ an ``update_*`` that accepts a partial payload.
 
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..database import CaptureSettings as DBCaptureSettings
-from ..database import GenerationSettings as DBGenerationSettings
+from ..database import CaptureSettings as DBCaptureSettings, GenerationSettings as DBGenerationSettings
 from ..utils.capture_chords import (
     default_push_to_talk_chord,
     default_toggle_to_talk_chord,
 )
 
-
 SINGLETON_ID = 1
+
+
+def _commit_singleton_row(db: Session, row: Any) -> Any:
+    """Commit a new singleton or return the row won by a concurrent request."""
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(type(row)).filter(type(row).id == SINGLETON_ID).first()
+        if existing is None:
+            raise
+        return existing
+
+    db.refresh(row)
+    return row
 
 
 def _get_or_create_capture_row(db: Session) -> DBCaptureSettings:
@@ -31,8 +45,7 @@ def _get_or_create_capture_row(db: Session) -> DBCaptureSettings:
             chord_toggle_to_talk_keys=default_toggle_to_talk_chord(),
         )
         db.add(row)
-        db.commit()
-        db.refresh(row)
+        row = _commit_singleton_row(db, row)
     return row
 
 
@@ -41,8 +54,7 @@ def _get_or_create_generation_row(db: Session) -> DBGenerationSettings:
     if row is None:
         row = DBGenerationSettings(id=SINGLETON_ID)
         db.add(row)
-        db.commit()
-        db.refresh(row)
+        row = _commit_singleton_row(db, row)
     return row
 
 

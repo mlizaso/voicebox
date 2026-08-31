@@ -16,8 +16,11 @@ from backend.services import stories
 
 
 @pytest.fixture
-def database(tmp_path: Path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'stories.db'}")
+def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    data_dir = tmp_path / "data"
+    (data_dir / "generations").mkdir(parents=True)
+    monkeypatch.setattr(stories.config, "_data_dir", data_dir)
+    engine = create_engine(f"sqlite:///{data_dir / 'stories.db'}")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     db = factory()
@@ -143,6 +146,48 @@ def test_reorder_preserves_duplicate_generation_clips_and_uses_trimmed_durations
     assert [item.start_time_ms for item in result] == [0, 6_200]
     assert db.query(StoryItem).filter_by(id="second").one().start_time_ms == 0
     assert db.query(StoryItem).filter_by(id="first").one().start_time_ms == 6_200
+
+
+@pytest.mark.parametrize(
+    ("status", "audio_path", "duration"),
+    [
+        ("generating", "generations/generation.wav", 10.0),
+        ("failed", "generations/generation.wav", 10.0),
+        ("completed", "", 10.0),
+        ("completed", None, 10.0),
+        ("completed", "generations/missing.wav", 10.0),
+        ("completed", "generations", 10.0),
+        ("completed", "generations/generation.wav", None),
+        ("completed", "generations/generation.wav", 0.0),
+        ("completed", "generations/generation.wav", -1.0),
+        ("completed", "generations/generation.wav", float("inf")),
+        ("completed", "generations/generation.wav", float("nan")),
+    ],
+)
+def test_add_item_rejects_unusable_generation_without_committing(
+    database,
+    status: str,
+    audio_path: str | None,
+    duration: float | None,
+) -> None:
+    db, _factory = database
+    _seed_story(db)
+    generation = db.query(Generation).filter_by(id="generation").one()
+    generation.status = status
+    generation.audio_path = audio_path
+    generation.duration = duration
+    db.commit()
+
+    response = asyncio.run(
+        stories.add_item_to_story(
+            "story",
+            models.StoryItemCreate(generation_id="generation"),
+            db,
+        )
+    )
+
+    assert response is None
+    assert db.query(StoryItem).count() == 0
 
 
 @pytest.mark.parametrize("failure", [_fail_after_durable_commit, _fail_refresh])

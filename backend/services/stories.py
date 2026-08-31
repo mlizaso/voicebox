@@ -149,6 +149,28 @@ def _story_item_count(story_id: str, db: Session) -> int:
     return db.query(func.count(DBStoryItem.id)).filter_by(story_id=story_id).scalar() or 0
 
 
+def _generation_is_usable_story_audio(generation: DBGeneration) -> bool:
+    """Return whether a generation can be represented and rendered as a Story clip."""
+    if generation.status != "completed":
+        return False
+    if not isinstance(generation.audio_path, str) or not generation.audio_path.strip():
+        return False
+    try:
+        duration = float(generation.duration)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(duration) or duration <= 0:
+        return False
+
+    audio_path = config.resolve_storage_path(generation.audio_path)
+    if audio_path is None:
+        return False
+    try:
+        return stat.S_ISREG(audio_path.stat().st_mode)
+    except OSError:
+        return False
+
+
 def _story_export_root() -> Path:
     """Return a private, managed, non-link directory for export scratch."""
     root = config.get_cache_dir() / STORY_EXPORT_ROOT_NAME
@@ -586,7 +608,7 @@ async def add_item_to_story(
         db: Database session
 
     Returns:
-        Created item detail or None if story/generation not found
+        Created item detail or None if the story or usable generation is not found
     """
     # Verify story exists
     story = db.query(DBStory).filter_by(id=story_id).first()
@@ -596,6 +618,8 @@ async def add_item_to_story(
     # Verify generation exists
     generation = db.query(DBGeneration).filter_by(id=data.generation_id).first()
     if not generation:
+        return None
+    if not _generation_is_usable_story_audio(generation):
         return None
 
     # Check if generation is already in story
