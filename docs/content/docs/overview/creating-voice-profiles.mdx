@@ -5,7 +5,7 @@ description: "How to create voice profiles, both cloning-based and preset-based"
 
 ## Overview
 
-A **voice profile** is a saved voice you can reuse across generations, stories, and the API. As of 0.4, Voicebox profiles come in two flavors that map to two different ways of getting a voice:
+A **voice profile** is a saved voice you can reuse across generations, stories, and the API. Voicebox profiles come in two flavors that map to two different ways of getting a voice:
 
 | Profile type   | What it stores                                       | Use when…                                                |
 | -------------- | ---------------------------------------------------- | -------------------------------------------------------- |
@@ -267,7 +267,7 @@ For Qwen CustomVoice presets, use the **instruct** field instead of relying on s
 
 - **Export** profiles to share or backup
 - **Import** from colleagues or teammates
-- **Cloned profiles** export with their voice embeddings (not the original audio)
+- **Cloned profiles** export with their reference audio and transcripts, plus supported metadata and optional avatar
 - **Preset profiles** export as engine + voice ID metadata only — the importer must have that engine's model installed
 
 ## Next Steps
@@ -286,3 +286,12 @@ For Qwen CustomVoice presets, use the **instruct** field instead of relying on s
     Create multi-voice narratives
   </Card>
 </Cards>
+
+## Storage and connection scope
+
+Profiles, recordings, history, and generated audio belong to the selected backend.
+See [storage and backup](/overview/storage-and-backup) for actual paths and backups,
+and [quick start](/overview/quick-start) for the current workflow.
+
+Reference text is limited to 1,000 characters per sample. A sample endpoint needs
+the confirmed transcript; automatic transcription in the UI is an editing aid.

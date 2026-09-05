@@ -1,5 +1,22 @@
 {
   "title": "API Reference",
-  "defaultOpen": true,
-  "pages": ["general", "profiles", "generation", "history", "models"]
+  "defaultOpen": false,
+  "pages": [
+    "index",
+    "general",
+    "profiles",
+    "generation",
+    "history",
+    "stories",
+    "captures",
+    "channels",
+    "effects",
+    "models",
+    "backends",
+    "tasks",
+    "agents",
+    "llm",
+    "settings",
+    "cloud"
+  ]
 }

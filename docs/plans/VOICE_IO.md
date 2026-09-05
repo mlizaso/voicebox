@@ -1,5 +1,8 @@
 # Voice I/O
 
+> **Historical design record — current status checked 2026-09-05.**
+> Captures, dictation, speech output, and connection isolation have evolved since this plan. Use [dictation](../content/docs/overview/dictation.mdx), [captures](../content/docs/overview/captures.mdx), and [architecture](../content/docs/developer/architecture.mdx) for current behavior.
+
 **Status:** Shipping — phases 1, 2, 4, 7 (macOS) complete · 3 partial · 5, 6, 7 (Windows/Linux), 8 pending
 **Touches:** backend, Tauri shell, frontend, a new native shim crate
 **Last reviewed:** 2026-04-21

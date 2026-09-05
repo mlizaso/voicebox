@@ -1,5 +1,8 @@
 # MCP Server — Voicebox Speed Run
 
+> **Historical design record — current status checked 2026-09-05.**
+> MCP is implemented, including later authentication and bounded transport. Use [the current MCP guide](../../backend/mcp_server/README.md) for configuration and supported fields.
+
 **Status:** v1 shipped — HTTP transport, all 4 tools, per-client bindings, `POST /speak`, stdio shim (binary built, bundled into Tauri sidecar), Settings UI, speak-pill via SSE with Rust-side `dictate:show` handler so agent-initiated speech surfaces the pill on screen. `cargo check` clean, `tsc` clean, full Inspector round-trip verified.
 **Last reviewed:** 2026-04-23
 

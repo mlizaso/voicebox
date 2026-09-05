@@ -1,119 +1,76 @@
 ---
 title: "Installation"
-description: "Download and install Voicebox on macOS, Windows, or Linux"
+description: "Choose a source build or packaged app, then verify your backend and storage"
 ---
 
-## Download
+## Choose the version you want to run
 
-Voicebox is available for macOS and Windows, with Linux builds coming soon.
+This documentation describes the `mlizaso/voicebox` checkout. To run its current
+changes, follow [development setup](/developer/setup) or build its installer.
+The landing site and configured desktop updater still point to
+[upstream releases](https://github.com/jamiepine/voicebox/releases). Check a
+release's actual assets for your operating system and processor; an upstream
+installer does not necessarily include this fork's later changes.
 
-<Cards>
-  <Card title="macOS" icon={<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2c-1.5 0-2.8.4-3.9 1.1A5.5 5.5 0 0 0 4 2.5C2.5 2.5 1 4 1 6c0 3.5 2.5 6 5 7.5C5 16 4 18 4 20c0 1.5.5 2.5 1.5 3C6.5 23.5 8 24 9.5 24c2 0 3.5-.5 5-2 1.5 1.5 3 2 5 2 1.5 0 3-.5 4-1 1-.5 1.5-1.5 1.5-3 0-2-1-4-2-6.5 2.5-1.5 5-4 5-7.5 0-2-1.5-3.5-3-3.5-.9 0-2.1.4-3.1 1.1A6.5 6.5 0 0 0 12 2Z"/></svg>}>
-    Download for Apple Silicon or Intel Macs
-  </Card>
-  <Card title="Windows" icon={<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>}>
-    Download MSI installer or Setup executable
-  </Card>
-</Cards>
+## Run from source
 
-### macOS
+Install Python 3.12+, Bun, and `just`. Desktop development also needs Rust and
+the native platform tools. On macOS, use Xcode for desktop builds.
 
-<Tabs items={["Apple Silicon", "Intel"]}>
-  <Tab value="Apple Silicon">
-    Download: [voicebox_aarch64.app.tar.gz](https://github.com/jamiepine/voicebox/releases/latest/download/voicebox_aarch64.app.tar.gz)
+```bash
+git clone https://github.com/mlizaso/voicebox.git
+cd voicebox
+just setup
+just dev
+```
 
-    ```bash
-    # Extract the archive
-    tar -xzf voicebox_aarch64.app.tar.gz
+For browser development, use `just dev-web` and open the Vite URL printed in the
+terminal. Both development recipes start the backend on port **17493**. Use
+[quick start](/overview/quick-start) for a stable backend without automatic
+reload during long generations.
 
-    # Move to Applications
-    mv Voicebox.app /Applications/
-    ```
-  </Tab>
-  <Tab value="Intel">
-    Download: [voicebox_x64.app.tar.gz](https://github.com/jamiepine/voicebox/releases/latest/download/voicebox_x64.app.tar.gz)
+The setup recipe handles platform-specific model dependencies. It does not
+download every model or install the private audiobook workspace.
 
-    ```bash
-    # Extract the archive
-    tar -xzf voicebox_x64.app.tar.gz
+## Use a packaged desktop app
 
-    # Move to Applications
-    mv Voicebox.app /Applications/
-    ```
-  </Tab>
-</Tabs>
+Choose the package matching the release, OS, and processor. On macOS, install
+the app in Applications; on Windows, run the supplied installer. The packaged
+app normally starts its bundled backend. If a server already occupies its port,
+connect explicitly only when it is a server you started.
 
-### Windows
+Profiles and audio belong to the active backend. Packaged app data normally lives
+at:
 
-<Tabs items={["MSI Installer", "Setup Executable"]}>
-  <Tab value="MSI Installer">
-    Download: [voicebox_x64_en-US.msi](https://github.com/jamiepine/voicebox/releases/latest/download/voicebox_x64_en-US.msi)
+| Platform | Data root |
+| --- | --- |
+| macOS | `~/Library/Application Support/sh.voicebox.app/` |
+| Windows | `%APPDATA%/sh.voicebox.app/` |
+| Linux | `$XDG_DATA_HOME/sh.voicebox.app/`, normally `~/.local/share/sh.voicebox.app/` |
 
-    Double-click the MSI file and follow the installation wizard.
-  </Tab>
-  <Tab value="Setup Executable">
-    Download: [voicebox_x64-setup.exe](https://github.com/jamiepine/voicebox/releases/latest/download/voicebox_x64-setup.exe)
+Source development from the repository root uses `./data/`. There is no extra
+`data/` suffix in the packaged paths. See [storage and backup](/overview/storage-and-backup)
+before moving data or diagnosing missing profiles.
 
-    Run the executable and follow the installation wizard.
-  </Tab>
-</Tabs>
+## Models and hardware
 
-### Linux
+The first request may download and load the selected engine. Weights are cached
+separately from application data, normally under `~/.cache/huggingface/hub/`.
+Use Settings to inspect installed models and disk space. Requirements vary by
+engine, model size, and input length; budget space for weights and generated audio.
 
-<Callout type="info">
-  Linux builds are coming soon. Currently blocked by GitHub runner disk space limitations.
-</Callout>
+Apple Silicon can use the pinned MLX/Metal stack. Other engines and platforms
+use their supported PyTorch CPU, CUDA, or ROCm path. A working desktop window
+does not by itself prove the desired model accelerator is active: check `/health`
+and perform a short generation. See [GPU acceleration](/overview/gpu-acceleration).
 
-## First Launch
+## Verify the installation
 
-When you launch Voicebox for the first time:
+1. Confirm the backend status in the app, or open `http://127.0.0.1:17493/health`.
+2. Open **Voices** and create a preset profile or a clone with reference audio.
+3. Generate a short passage and play it back.
+4. Check the selected server and its `/health/filesystem` paths before importing
+   your existing profiles or starting a long job.
 
-1. **Model Download** — The TTS engine you generate with first will download its model automatically. Sizes range from ~350 MB (Kokoro) to ~8 GB (TADA 3B). Most users start with Qwen 1.7B (~3.5 GB).
-2. **Data Directory** — Voice profiles and generated audio are stored in:
-   - macOS: `~/Library/Application Support/sh.voicebox.app/`
-   - Windows: `%APPDATA%/sh.voicebox.app/`
-   - Linux: `~/.config/sh.voicebox.app/`
-
-3. **Backend Server** — The bundled Python server starts automatically
-
-<Callout type="info">
-  First generation will be slower due to model downloads. Subsequent runs use cached models.
-</Callout>
-
-## System Requirements
-
-### Minimum
-
-- **OS:** macOS 11+, Windows 10+, or Linux
-- **RAM:** 8GB
-- **Storage:** 5GB free space (for models and data)
-- **CPU:** Modern multi-core processor
-
-### Recommended
-
-- **RAM:** 16GB+
-- **GPU:** CUDA-capable NVIDIA GPU (for faster generation)
-- **Storage:** 10GB+ free space
-
-<Callout type="info">
-  CPU inference is supported but significantly slower than GPU. A CUDA-capable GPU is highly recommended for real-time workflows.
-</Callout>
-
-## Verification
-
-After installation, verify everything works:
-
-1. Launch Voicebox
-2. Check the server status indicator in the bottom-left corner (should be green)
-3. Navigate to **Profiles** and create a test profile
-4. Generate a short audio clip to verify the TTS engine works
-
-<Callout type="success">
-  If you see a green status indicator and can generate audio, you're all set!
-</Callout>
-
-## Next Steps
-
-<Card title="Quick Start Guide" href="/overview/quick-start">
-  Create your first voice profile and generate speech
-</Card>
+Continue with [quick start](/overview/quick-start), [remote mode](/overview/remote-mode),
+or the [Docker guide](/overview/docker).

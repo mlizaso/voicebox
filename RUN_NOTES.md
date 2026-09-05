@@ -1,5 +1,12 @@
 # Audiobook resume checkpoints — run notes
 
+> **Historical implementation record.** For current commands, storage locations,
+> and project layout, read [README.md](README.md). For the private book wizard,
+> read [docs/AUDIOBOOKS.md](docs/AUDIOBOOKS.md). Paths, hashes, test counts, and
+> benchmarks below describe their original revision and may be superseded.
+> Current security/replay work through `8c6a3cf` is documented in the
+> [2026-09-05 audit](docs/SECURITY_AUDIT_2026-09-05.md).
+
 ## Contract
 
 Implement durable audiobook-generation progress for

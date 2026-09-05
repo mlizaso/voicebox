@@ -10,8 +10,10 @@ a chord, talk, release — Voicebox transcribes what you said with Whisper,
 optionally cleans it up with a local LLM, and pastes the result into the text
 field you had focused when you started.
 
-Everything happens on your hardware. No cloud, no accounts, no audio leaving
-the machine.
+Processing runs on the selected backend. A local backend keeps audio on this
+machine; a remote connection sends it to that server. Enable dictation and complete
+the readiness/permission checks in **Settings → Captures** before using the chord.
+New settings leave the global hotkey disabled until you enable it.
 
 <Callout type="info">
   Dictation was introduced in **0.5.0** alongside the Captures tab and the
@@ -95,17 +97,18 @@ Open **Settings → Captures → Dictation** to change either chord.
 ## Auto-paste into the focused app
 
 Once transcription finishes, Voicebox can synthesize a native paste into
-whatever text field had focus when you started the chord. Your clipboard is
-saved before and restored after, so nothing you had copied goes missing.
+whatever text field had focus when you started the chord. The clipboard is
+saved first and restored only if it has not changed during the paste window, so
+newer clipboard contents are preserved.
 
 | Platform | Mechanism |
 |---|---|
 | macOS | `CGEventPost` at the HID tap with a full `⌘V` key sequence, preceded by reactivating the original app via `NSRunningApplication`. |
 | Windows | `SendInput` with correct scan codes, plus a `SetForegroundWindow` + `AttachThreadInput` handshake to defeat foreground-lock when pasting into a window that wasn't frontmost at chord-start. |
 
-**Focus is snapshotted at chord-start.** The paste targets the original field
-even if focus drifts during transcribe / refine — that's the "pastes where you
-were talking *from*, not where you're looking *now*" behavior.
+**The target is captured at chord-start.** Native checks validate the captured
+target before pasting. If the target is no longer valid, use the saved transcript
+in Captures instead of relying on whichever window happens to be focused.
 
 <Callout type="info">
   Auto-paste is optional. If Accessibility permission isn't granted (macOS),
@@ -132,7 +135,7 @@ What refinement typically fixes:
   more identical tokens in a row, case-insensitive) *before* the LLM
   sees the transcript, so a small refinement model can't echo them back
 
-What refinement deliberately preserves:
+What refinement aims to preserve (review the result):
 
 - Technical terms and code identifiers (`npm install`, `handleSubmit`)
 - Legitimate repetition (`no, no, no, no, no` has fewer than six identical
@@ -148,7 +151,9 @@ bundled Qwen3 sizes:
 |---|---|---|
 | Qwen3 0.6B | ~400 MB | Default. Very fast, good for casual dictation. |
 | Qwen3 1.7B | ~1.1 GB | Sweet spot when transcripts contain code identifiers. |
-| Qwen3 4B | ~2.5 GB | Full quality, slowest. |
+| Qwen3 4B | ~2.5 GB | Largest available option; compare results on your content. |
+
+These approximate download sizes describe MLX variants; PyTorch weights differ.
 
 This is the same local LLM used by the per-profile personality modes — one
 LLM in the app, not two. See [Voice Personalities](/overview/voice-personalities).
@@ -206,3 +211,12 @@ A few cases where Voicebox deliberately does *not* synthesize a paste:
     Developer-level details on Whisper, Whisper Turbo, and the STT backend.
   </Card>
 </Cards>
+
+## Storage and connection scope
+
+Profiles, recordings, history, and generated audio belong to the selected backend.
+See [storage and backup](/overview/storage-and-backup) for actual paths and backups,
+and [quick start](/overview/quick-start) for the current workflow.
+
+Changing servers during a recording cancels the eventual upload. Native focus/paste
+targets are short-lived and validated; a missing target must not paste into another app.

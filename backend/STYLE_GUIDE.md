@@ -1,5 +1,8 @@
 # Python Style Guide
 
+For current module ownership and commands, see [the backend guide](README.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md). This file defines coding conventions.
+
 Target: **Python 3.12+** | Formatter/Linter: **Ruff** | Config: `backend/pyproject.toml`
 
 This guide codifies the conventions used across the backend, and prescribes the target style for code written during the refactor (Phases 3-6). Existing code should be migrated incrementally -- don't reformat entire files in unrelated PRs.

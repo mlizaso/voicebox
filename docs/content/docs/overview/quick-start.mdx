@@ -1,164 +1,58 @@
 ---
 title: "Quick Start"
-description: "Get started with Voicebox in 5 minutes"
+description: "Create a voice, generate speech, and find the saved result"
 ---
 
-This guide will walk you through creating your first voice profile and generating speech.
+## Start Voicebox
 
-## Prerequisites
+Launch the desktop app, or run `just dev` from a configured source checkout.
+`just dev-web` starts the backend and browser UI. For a long render, use a
+stable backend without reload; see [development setup](/developer/setup).
 
-Make sure you have [installed Voicebox](/overview/installation) and launched the app.
+The main repository `README.md` is the complete one-file operating guide,
+including the separate private audiobook workspace.
 
-## Step 1: Create a Voice Profile
+## Create or import a voice
 
-Voice profiles are the foundation of Voicebox. Each profile contains voice samples that the AI uses to clone the voice.
+1. Open **Voices** and create a profile with a name and language.
+2. Choose a cloned voice or an engine's preset. Preset voices need no recording.
+3. For cloning, upload or record a clean reference of at most 30 seconds and
+   confirm its exact transcript. The transcript limit is 1,000 characters per sample.
+4. Save the profile. You can also import a profile ZIP containing metadata and
+   reference audio. Profiles are stored on the currently connected backend.
 
-<Steps>
-  <Step title="Navigate to Voices">
-    Click the **Voices** tab in the sidebar
-  </Step>
+See [creating voice profiles](/overview/creating-voice-profiles) for sample and
+preset details. The importer restores supported profile metadata, samples, and
+optional avatar; cloning exports contain reference audio, not just embeddings.
 
-  <Step title="Create New Voice">
-    Click the **+ New Voice** button
+## Generate a short sample
 
-    Fill in the details:
-    - **Name:** A descriptive name (e.g., "John Smith")
-    - **Language:** Select the primary language
-    - **Description:** Optional notes about the voice
-  </Step>
+Select the voice in the generation form, choose the compatible engine/model and
+language, and enter a few sentences. Review instructions and effects. Leave
+personality rewriting off if the exact text must be spoken.
 
-  <Step title="Add Voice Sample">
-    You have two options:
+Click **Generate** and follow the queued request in history. First use may need
+a model download and load; generation time depends on the model, text, and device.
+When complete, play the result and check pronunciation and delivery before a long run.
 
-    **Option A: Upload Audio**
-    - Click **Upload Sample**
-    - Select an audio file (WAV, MP3, or M4A)
-    - Ideal length: 10-30 seconds of clear speech
+Normal defaults are 800 characters per chunk, 50 ms crossfade, and normalization
+enabled. These are saved with new generation records and reused on replay.
+Qwen cloning supports 0.6B/1.7B; TADA supports 1B/3B. Preset profiles stay bound
+to the engine that supplies their voice.
 
-    **Option B: Record Live**
-    - Click **Record Sample**
-    - Speak clearly for 10-30 seconds
-    - Click stop when finished
-  </Step>
+## Keep or reuse the result
 
-  <Step title="Save Profile">
-    Click **Create Profile** to save
-  </Step>
-</Steps>
+Download audio for playback, export a generation ZIP for its audio plus metadata,
+or add the clip to a story. Regeneration makes a new take; it is not a guarantee
+of the same waveform. Imported audio has no TTS request to regenerate.
 
-<Callout type="info">
-  For best results, use clean audio with minimal background noise and consistent speaking tone.
-</Callout>
+See [generation history](/overview/generation-history) and
+[stories](/overview/stories-editor). Full-book EPUB ingestion and resume belong
+to the optional private launcher described in the repository's `docs/AUDIOBOOKS.md`.
 
-## Step 2: Generate Speech
+## Find the files
 
-Now let's use your new voice profile to generate speech.
-
-<Steps>
-  <Step title="Go to Generation">
-    Click the **Generate** tab in the sidebar
-  </Step>
-
-  <Step title="Select Voice Profile">
-    Choose your newly created profile from the dropdown
-  </Step>
-
-  <Step title="Enter Text">
-    Type or paste the text you want to generate:
-
-    ```
-    Hello! This is my first voice generation with Voicebox.
-    ```
-
-    <Callout type="info">
-      Paralinguistic tags like `[laugh]`, `[sigh]`, and `[gasp]` only work with
-      **Chatterbox Turbo**. Qwen3-TTS, LuxTTS, Chatterbox Multilingual, and
-      HumeAI TADA will read those tags literally instead of turning them into
-      expressive sounds.
-    </Callout>
-
-    To insert supported tags, select **Chatterbox Turbo** and type `/` in the
-    text input to open the tag inserter.
-  </Step>
-
-  <Step title="Generate">
-    Click **Generate** and wait a few seconds
-
-    <Callout type="info">
-      First generation may take longer due to model initialization. Subsequent generations will be faster.
-    </Callout>
-  </Step>
-
-  <Step title="Play & Download">
-    - Click **Play** to preview the audio
-    - Click **Download** to save the audio file
-    - The generation is also saved to your **History**
-  </Step>
-</Steps>
-
-## Step 3: Build a Story (Optional)
-
-The Stories Editor lets you create multi-voice narratives with a timeline-based interface.
-
-<Steps>
-  <Step title="Create New Story">
-    Navigate to **Stories** and click **+ New Story**
-  </Step>
-
-  <Step title="Add Voice Tracks">
-    Click **+ Add Track** to create tracks for different speakers
-  </Step>
-
-  <Step title="Add Audio Clips">
-    - Drag generated audio from your History
-    - Or generate new clips directly in the timeline
-    - Arrange clips on the timeline
-  </Step>
-
-  <Step title="Edit & Export">
-    - Trim clips by dragging edges
-    - Adjust timing and spacing
-    - Click **Export** to render the final audio
-  </Step>
-</Steps>
-
-## What's Next?
-
-<Cards>
-  <Card title="Voice Cloning Guide" href="/overview/creating-voice-profiles">
-    Learn advanced techniques for high-quality voice cloning
-  </Card>
-  <Card title="API Integration" href="/api-reference">
-    Integrate Voicebox into your own applications
-  </Card>
-  <Card title="Stories Editor" href="/overview/stories-editor">
-    Master the multi-track timeline editor
-  </Card>
-  <Card title="Remote Mode" href="/overview/remote-mode">
-    Connect to a GPU server for faster generation
-  </Card>
-</Cards>
-
-## Tips for Success
-
-<AccordionGroup>
-  <Accordion title="Getting the Best Voice Quality">
-    - Use 10-30 seconds of clear, consistent speech
-    - Avoid background noise and echo
-    - Multiple samples from the same speaker improve quality
-    - Match the speaking style you want to generate
-  </Accordion>
-
-  <Accordion title="Improving Generation Speed">
-    - Use a CUDA-capable GPU for 5-10x faster generation
-    - Enable voice prompt caching for repeated generations
-    - Consider running the backend on a remote GPU server
-  </Accordion>
-
-  <Accordion title="Troubleshooting Common Issues">
-    - **Server won't start:** Check if port 17493 is available
-    - **Poor audio quality:** Try adding more voice samples
-    - **Slow generation:** Verify GPU acceleration is enabled
-    - See the full [Troubleshooting Guide](/overview/troubleshooting) for more
-  </Accordion>
-</AccordionGroup>
+Use `GET /health/filesystem` on your connected server. Development from the root
+uses `./data/`; the packaged app uses its OS data directory. Profile metadata
+and sample transcripts are in `voicebox.db`, sample WAVs in `profiles/{id}/`, and
+audio in `generations/`. See [storage and backup](/overview/storage-and-backup).

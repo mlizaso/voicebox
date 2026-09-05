@@ -1,0 +1,72 @@
+---
+title: "Storage & Backup"
+description: "Find voice profiles, audio, model weights, and saved books"
+---
+
+## Ask the connected server
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:17493/health/filesystem \
+  | python3 -m json.tool
+```
+
+The response labels `data`, `profiles`, `generations`, and `captures` and reports
+available disk space. A remote request needs its bearer token. The private book
+launcher normally uses port 17494, so query that port for its storage.
+
+## Default roots
+
+| Runtime | Data root |
+| --- | --- |
+| Development from repository root | `./data/` |
+| Packaged macOS | `~/Library/Application Support/sh.voicebox.app/` |
+| Packaged Windows | `%APPDATA%\sh.voicebox.app\` |
+| Packaged Linux | `$XDG_DATA_HOME/sh.voicebox.app/`, normally `~/.local/share/sh.voicebox.app/` |
+| Standalone CLI | `--data-dir` value, or `data/` relative to the working directory |
+| Compose | `/app/data` volume, with generated audio also mounted to host `./output/` |
+| Remote | The server's root, not the desktop client's filesystem |
+
+There is no extra `data/` under the packaged app directory. The desktop can
+explicitly connect to an existing backend, which keeps its own chosen root.
+
+## What to preserve
+
+| Path under the data root | Contents |
+| --- | --- |
+| `voicebox.db` | Profile metadata, sample transcripts, history, versions, stories, settings |
+| `profiles/{id}/` | Reference WAVs and avatars |
+| `generations/` | Generated/imported audio and version artifacts |
+| `captures/` | Saved recording/capture audio |
+| `exact_voice_snapshots/` | Frozen exact-generation references |
+| `cache/` | Derived conditioning cache |
+| `deletion_journal/` | Recovery ownership records |
+| `logs/`, `backends/` | Diagnostics and optional accelerator sidecars |
+
+Profile names are not directory names. A profile folder without its database
+metadata/transcripts is not a complete profile backup. Use the app's profile ZIP
+export for one portable voice; cloned exports include reference audio.
+
+Model weights normally live in `~/.cache/huggingface/hub/`, separately from app
+data. `HF_HOME`, `HF_HUB_CACHE`, or Voicebox's `VOICEBOX_MODELS_DIR` can override it.
+Query `/models/cache-dir` or inspect model settings for the active cache path.
+
+## Backup and move
+
+Stop every backend using the root before copying the whole data directory.
+Keep SQLite files together; WAL/SHM files are not disposable lock files.
+For a standalone server, copy to a real directory and restart with
+`--data-dir /absolute/new/path`. Changing a path does not copy data by itself.
+Model migration is separate and refuses existing destination models or linked roots.
+
+On POSIX, sensitive data is private by default. The optional
+`VOICEBOX_SHARED_GENERATIONS=1` makes generated output host-readable while the
+database, profiles, captures, cache, and logs remain private.
+
+## Private audiobook workspace
+
+The ignored `voice-profile/` tree contains source narrator assets and tools;
+it is different from the backend's `profiles/` directory. The local launcher
+saves jobs under `~/Library/Application Support/Fabian Audiobook Maker/progress/`,
+partial audio beneath the selected output folder, and final books in that folder.
+Keep both saved jobs and work directories to resume; retain the matching runtime.
+The repository's `docs/AUDIOBOOKS.md` covers the private workflow in detail.

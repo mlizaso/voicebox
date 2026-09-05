@@ -1,218 +1,80 @@
 ---
 title: "Auto-Updater"
-description: "How Voicebox automatic updates work"
+description: "Desktop signing, release channels, and separate GPU backend packages"
 ---
 
-## Overview
+Desktop updates use Tauri's updater plugin. The endpoint and public verification
+key live in `tauri/src-tauri/tauri.conf.json`. This fork still points at
+`jamiepine/voicebox` releases, so an upstream update does not necessarily preserve
+fork changes. Identify the actual build/commit when testing a fix.
 
-Voicebox uses Tauri's built-in auto-updater to deliver signed updates to users. The system verifies updates cryptographically before installation.
+## Desktop update flow
 
-## How It Works
+The shared UI calls its platform updater contract. The desktop implementation in
+`tauri/src/platform/updater.ts` checks the configured release manifest, reports
+available versions and download progress, downloads a signed package, and applies
+it through the Tauri plugin. Restart behavior is platform-specific; the Windows
+installer handles its restart. Browser clients do not use the desktop updater.
 
-When Voicebox launches (in production Tauri builds only), it checks GitHub Releases for a `latest.json` manifest. If a newer version is available:
+The release manifest contains a version and per-platform download/signature
+information. A build needs a higher released version to be offered as an update;
+two different commits with application version `0.5.0` are not distinguishable
+by a version comparison alone.
 
-1. **Notification** - An update banner appears at the top of the app
-2. **Download** - User clicks "Install Now" to download the update package
-3. **Verification** - The downloaded package is cryptographically verified using the public key embedded in `tauri.conf.json`
-4. **Installation** - After verification, the update is installed
-5. **Restart** - The app restarts automatically with the new version
+## Signing and release ownership
 
-Users can also check for updates manually via **Settings → Check for Updates**.
+The public key is safe to distribute. The matching private key and optional
+password are supplied through `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the release environment. Never commit the
+private key or bypass verification after an invalid-signature error.
 
-## Configuration
+`.github/workflows/release.yml` defines artifact creation and publication.
+Use the project's changelog/version/release workflow for a new release instead of
+publishing an arbitrary tag. Repointing a fork's updater requires an intentional
+release channel, signing setup, and a tested manifest for each supported target.
 
-The updater is configured in `tauri/src-tauri/tauri.conf.json`:
+## CUDA and ROCm backends
 
-```json
-{
-  "plugins": {
-    "updater": {
-      "active": true,
-      "dialog": false,
-      "endpoints": [
-        "https://github.com/jamiepine/voicebox/releases/latest/download/latest.json"
-      ],
-      "pubkey": "PASTE_PUBLIC_KEY_CONTENT_HERE"
-    }
-  }
-}
-```
+GPU backends are installed separately from the desktop update package. On
+supported Windows installations, Settings can download a server-core archive
+and a versioned CUDA or ROCm library archive. Matching libraries can be reused
+when only the server core changes. Consult the download response for actual sizes.
 
-**Key settings:**
-- `endpoints` - URL to the `latest.json` manifest (checked on app startup)
-- `pubkey` - Public key for verifying update signatures
-- `dialog` - Set to `false` (we use custom UI instead of Tauri's built-in dialog)
+| Component | Source |
+| --- | --- |
+| CUDA status, download, update policy | `backend/services/cuda.py` |
+| ROCm status, download, update policy | `backend/services/rocm.py` |
+| Shared bounded downloads, checksums, safe extraction/install | `backend/utils/backend_archive.py` |
+| HTTP/SSE endpoints | `backend/routes/cuda.py`, `backend/routes/rocm.py` |
+| Archive packaging | `scripts/package_cuda.py`, `scripts/package_rocm.py` |
 
-## Release Manifest
+Installed packages live at `<data-root>/backends/cuda/` or
+`<data-root>/backends/rocm/`. Downloads require a valid SHA-256 checksum and bounded
+archive validation. Interrupted installations have recovery logic; checksums from
+the release source provide integrity and are distinct from Tauri package signatures.
 
-The `latest.json` file defines available updates per platform:
+## API
 
-```json
-{
-  "version": "0.2.0",
-  "notes": "Bug fixes and improvements",
-  "pub_date": "2026-01-25T12:00:00Z",
-  "platforms": {
-    "darwin-aarch64": {
-      "signature": "base64_encoded_signature",
-      "url": "https://github.com/jamiepine/voicebox/releases/download/v0.2.0/voicebox_0.2.0_aarch64.app.tar.gz"
-    },
-    "darwin-x86_64": {
-      "signature": "base64_encoded_signature",
-      "url": "https://github.com/jamiepine/voicebox/releases/download/v0.2.0/voicebox_0.2.0_x64.app.tar.gz"
-    },
-    "linux-x86_64": {
-      "signature": "base64_encoded_signature",
-      "url": "https://github.com/jamiepine/voicebox/releases/download/v0.2.0/voicebox_0.2.0_amd64.AppImage"
-    },
-    "windows-x86_64": {
-      "signature": "base64_encoded_signature",
-      "url": "https://github.com/jamiepine/voicebox/releases/download/v0.2.0/voicebox_0.2.0_x64_en-US.msi"
-    }
-  }
-}
-```
+| Method | CUDA path | ROCm path |
+| --- | --- | --- |
+| GET | `/backend/cuda-status` | `/backend/rocm-status` |
+| POST | `/backend/download-cuda` | `/backend/download-rocm` |
+| GET (SSE) | `/backend/cuda-progress` | `/backend/rocm-progress` |
+| DELETE | `/backend/cuda` | `/backend/rocm` |
 
-## Signing
-
-Updates must be cryptographically signed to be accepted. The signing process:
-
-1. **Generate keys** (one-time setup):
-   ```bash
-   bun tauri signer generate -w ~/.tauri/voicebox.key
-   ```
-   This creates:
-   - Private key: `~/.tauri/voicebox.key` (stored in GitHub Secrets, never committed)
-   - Public key: `~/.tauri/voicebox.key.pub` (pasted into `tauri.conf.json`)
-
-2. **Build with signing** (GitHub Actions handles this):
-   - Set `TAURI_SIGNING_PRIVATE_KEY` environment variable
-   - Tauri signs the update package during build
-   - Generates `.sig` signature file alongside the installer
-
-3. **Verification** - The updater compares the signature against the public key before installing
-
-## GitHub Actions Workflow
-
-The release workflow (`.github/workflows/release.yml`) automatically:
-
-- Builds signed releases for macOS, Windows, and Linux
-- Creates the `latest.json` manifest with signatures
-- Uploads everything to the GitHub Release
-
-Triggered by pushing a git tag:
-
-```bash
-git tag v0.2.0 && git push --tags
-```
-
-## Environment Variables
-
-GitHub Actions needs these secrets set:
-
-- `TAURI_SIGNING_PRIVATE_KEY` - Content of `~/.tauri/voicebox.key`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` - Password for the key (if set)
-
-## Security
-
-<Callout type="warn">
-  **Critical:** Never commit the private key. Store it only in GitHub Secrets. The public key in `tauri.conf.json` is safe to commit and distribute.
-</Callout>
-
-- Updates are cryptographically signed using Ed25519
-- HTTP endpoints are blocked (HTTPS only)
-- Signature verification happens before installation
-- Failed verification aborts the update
+Use the [API reference](/api-reference) for response schemas and server
+authentication. Backend installs, removals, and model operations enforce their
+operation guards; do not replace files manually while generation is active.
 
 ## Troubleshooting
 
-### "Invalid signature" error
-- Public key in `tauri.conf.json` doesn't match the private key used to sign
-- Signature file wasn't uploaded to the release
+| Symptom | Check |
+| --- | --- |
+| No desktop update offered | Current version, configured endpoint, and release target assets |
+| Invalid signature | Manifest signature, matching public/private key, and uploaded artifact |
+| Download or checksum failure | Release asset/checksum availability, network access, and free disk space |
+| Fork fix seems missing | Actual installed commit/build and upstream updater channel |
+| GPU backend is unavailable | Supported OS/device and engine runtime; see the GPU guide |
 
-### "No update available" when one exists
-- `latest.json` version isn't higher than current version
-- Wrong endpoint URL in configuration
-- Manifest hasn't propagated to GitHub's CDN yet
-
-### Update check fails in dev mode
-The updater only works in production Tauri builds. It doesn't run during `just dev` or web mode.
-
-### Build fails with signing error
-- GitHub Secrets aren't set correctly
-- Private key file is missing or corrupted
-- Key format is wrong (should start with `dW50cnVzdGVkIGNvbW1lbnQ6`)
-
-## CUDA Backend Updates
-
-The CUDA-enabled backend is distributed separately from the main app because bundling CUDA would bloat the installer by several gigabytes for users who don't have an NVIDIA GPU. Unlike the Tauri auto-updater, the CUDA backend uses a custom download system built into the Python server.
-
-**Size comparison (approximate):**
-- Standard CPU bundle (in the installer): ~200–400 MB
-- CUDA server core: ~945 MB (versioned with each Voicebox release)
-- CUDA libs (NVIDIA runtime DLLs): ~1.7 GB (versioned independently, cached across upgrades)
-
-### Two-archive split
-
-Since v0.4, the CUDA binary is packaged as **two archives** instead of one:
-
-- **Server core** (`voicebox-server-cuda.tar.gz`) — the Python server + PyTorch code, changes every release.
-- **CUDA libs** (`cuda-libs-cu128-v1.tar.gz`) — the heavy NVIDIA CUDA/cuDNN DLLs, only re-downloaded when the CUDA toolkit major version changes.
-
-This means most Voicebox upgrades only re-download the ~945 MB server core, not the full ~2.5 GB bundle.
-
-### Download Process
-
-When a user clicks "Install CUDA backend" in Settings → GPU:
-
-1. **Server-core archive** — Downloaded from GitHub Releases and extracted.
-2. **CUDA libs archive** — Downloaded separately (or reused if the installed version still matches).
-3. **Verification** — SHA-256 checksum verification for integrity.
-4. **Placement** — Extracted into `{data_dir}/backends/cuda/`.
-5. **Restart** — The Voicebox server restarts and swaps in the CUDA backend.
-
-### Auto-Update on Startup
-
-On startup, the backend compares the installed CUDA server-core version with the current app version. If they differ, the core archive is pulled in the background. If the libs version pinned by the new release also differs (rare — e.g. on a cu126 → cu128 bump), the user is prompted to confirm the larger download.
-
-### Storage Location
-
-Downloaded CUDA binaries live in the app's data directory:
-
-```
-{data_dir}/backends/cuda/
-  voicebox-server-cuda.exe    # Windows
-  voicebox-server-cuda        # macOS/Linux
-  <NVIDIA CUDA runtime DLLs>
-```
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/backend/cuda-status` | GET | Check if the CUDA backend is available/active and which versions are installed |
-| `/backend/download-cuda` | POST | Trigger server-core + libs download |
-| `/backend/cuda-progress` | GET | SSE stream of download progress |
-| `/backend/cuda` | DELETE | Remove the downloaded CUDA backend |
-
-### Progress Tracking
-
-Downloads report progress via Server-Sent Events (SSE):
-
-```
-GET /backend/cuda-progress
-
-event: progress
-data: {"current": 52428800, "total": 945000000, "filename": "voicebox-server-cuda.tar.gz", "status": "downloading"}
-```
-
-The frontend subscribes to this endpoint to show real-time progress, including which archive (server core vs libs) is currently downloading.
-
-### Release Artifacts
-
-For each CUDA-capable release, these files are uploaded to GitHub:
-
-- `voicebox-server-cuda.tar.gz` — server-core archive
-- `voicebox-server-cuda.tar.gz.sha256` — checksum
-- `cuda-libs-cu128-v1.tar.gz` — CUDA runtime libs (only when the libs version bumps)
-- `cuda-libs-cu128-v1.tar.gz.sha256` — checksum
+See [building](/developer/building), [GPU acceleration](/overview/gpu-acceleration),
+and [storage](/overview/storage-and-backup) for setup and data locations.

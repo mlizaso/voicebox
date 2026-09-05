@@ -1,59 +1,60 @@
-# Backend Tests
+# Backend tests
 
-Manual test scripts for debugging and validating backend functionality.
+Run from the repository root with the backend environment:
 
-## Test Files
-
-### `test_generation_progress.py`
-Tests TTS generation with SSE progress monitoring to identify UX issues where users see download progress even when the model is already cached.
-
-**Usage:**
 ```bash
-cd backend
-python tests/test_generation_progress.py
+backend/venv/bin/python -m pytest backend/tests -q
 ```
 
-**Prerequisites:**
-- Server must be running (`python main.py`)
-- At least one voice profile must exist
+`just test` runs the same directory with verbose output. This is primarily an
+automated regression suite, not a collection of manual scripts. It covers HTTP
+validation/security, profile and archive operations, generation publication and
+replay, model lifecycle/queue behavior, exact-runtime contracts, stories, captures,
+and recovery. Most tests use synthetic audio, temporary databases, and mocks.
 
-### `test_real_download.py`
-Tests real model download with SSE progress monitoring.
+## Focused checks
 
-**Usage:**
 ```bash
-cd backend
-# Delete cache first to force fresh download
-rm -rf ~/.cache/huggingface/hub/models--openai--whisper-base
-python tests/test_real_download.py
+backend/venv/bin/python -m pytest backend/tests/test_generation_replay_settings.py -q
+backend/venv/bin/python -m pytest backend/tests/test_archive_import_security.py -q
+backend/venv/bin/python -m pytest backend/tests/test_api_security.py -q
+backend/venv/bin/ruff check backend/tests
+backend/venv/bin/ruff format --check backend/tests
 ```
 
-**Prerequisites:**
-- Server must be running (`python main.py`)
+New regression tests should fail when the corresponding fix is removed. Do not
+weaken assertions or exact-audio/runtime checks to accommodate a failure.
+Platform-specific skips and existing lint debt must be stated separately from
+the checks that passed. On Apple Silicon, Metal-related checks need the host
+runtime; an isolated environment that cannot initialize Metal is not an audio
+quality test.
 
-### `test_progress.py`
-Pytest coverage for `ProgressManager` and `HFProgressTracker` that can also be
-run as a standalone diagnostic from the repository root.
+## Real models and frozen builds: opt in
 
-**Usage:**
+`test_all_models_e2e.py` is a standalone runner. It locates/builds a frozen
+server, uses a temporary data directory and port, then exercises selected engines.
+It may download large models and perform real inference; it is not part of the
+ordinary mocked pytest quality guarantee.
+
 ```bash
-python -m backend.tests.test_progress
+backend/venv/bin/python backend/tests/test_all_models_e2e.py --help
+backend/venv/bin/python backend/tests/test_all_models_e2e.py \
+  --only qwen --skip-build --binary /absolute/path/to/voicebox-server \
+  --reference-wav /absolute/path/to/reference.wav \
+  --reference-text 'The exact words spoken in the sample.'
 ```
 
-### `test_check_progress_state.py`
-Debugging script to inspect the internal state of ProgressManager and TaskManager.
+See [fixture instructions](fixtures/README.md) and the
+[original design](E2E_MODEL_TEST_DESIGN.md). The runner's current `--help` and
+implementation take precedence over the dated design. Keep private samples out
+of Git and use an explicit results directory if retaining reports.
 
-**Usage:**
-```bash
-cd backend
-python tests/test_check_progress_state.py
-```
+## Other suites
 
-## Notes
+- Shared app: `bun run --cwd app test`; the Bun preload installs storage before
+  persisted stores load, so test order does not decide the storage implementation.
+- Native: commands in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+- Private audiobook renderer: separate tests in ignored `voice-profile/build/`;
+  these are not included in the backend pytest command.
 
-Most files described here are manual diagnostic scripts; `test_progress.py` is
-also part of the automated pytest suite. They're designed for:
-- Debugging progress tracking issues
-- Validating SSE event streams
-- Monitoring real-time download behavior
-- Inspecting internal state during development
+Current verification evidence is in the [audit report](../../docs/SECURITY_AUDIT_2026-09-05.md).

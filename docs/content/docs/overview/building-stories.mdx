@@ -1,37 +1,27 @@
 ---
 title: "Building Stories"
-description: "Create multi-voice narratives with the Stories Editor"
+description: "Arrange generated clips into a multi-voice timeline"
 ---
 
-## Getting Started
+## Build a story
 
-The Stories Editor is perfect for creating podcasts, audiobooks, and multi-speaker content.
+1. Create a story in **Stories** and give it a title.
+2. Add generated or imported clips, assigning speakers/tracks as needed.
+3. Arrange start times; trim, split, or duplicate clips in the timeline.
+4. Choose the version to pin for each clip when several takes/effects versions exist.
+5. Preview the arrangement and export the mixed WAV.
 
-<Steps>
-  <Step title="Create Story">
-    **Stories** → **+ New Story**
-  </Step>
-  <Step title="Add Tracks">
-    Create tracks for each speaker
-  </Step>
-  <Step title="Add Clips">
-    Generate or drag audio to tracks
-  </Step>
-  <Step title="Arrange">
-    Position and trim clips on timeline
-  </Step>
-  <Step title="Export">
-    Render final audio
-  </Step>
-</Steps>
+The [Stories editor guide](/overview/stories-editor) covers the timeline controls.
+The [developer guide](/developer/stories) explains item timing and version ownership.
 
-## Use Cases
+Exports use bounded, disk-backed mixing with limits of 1,000 items and a
+24-hour mono 24 kHz timeline. Source/import limits are separate. A browser that
+cannot stream files to disk may reject an export above its 64 MiB memory limit;
+use the desktop client or a browser with the supported save-file API.
 
-- Multi-host podcasts
-- Audiobook narration with character voices
-- Game dialogue scenes
-- Educational content with multiple speakers
+## Books and resume
 
-## Coming Soon
-
-Full timeline editor documentation will be added as features are finalized.
+A story is a reusable clip arrangement. The optional private audiobook launcher
+adds EPUB/text ingestion, chapter metadata, narrator demos, M4B/M4A/MP3/WAV output,
+and saved book-wide progress. It is not shipped as a built-in audiobook tab.
+See the repository README and `docs/AUDIOBOOKS.md` for that local workflow.

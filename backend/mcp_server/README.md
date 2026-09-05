@@ -1,126 +1,100 @@
 # Voicebox MCP server
 
-Local **Model Context Protocol** server — lets any MCP-aware agent
-(Claude Code, Cursor, Windsurf, VS Code MCP extensions, etc.) speak text
-in your cloned voices, transcribe audio, and browse captures.
+MCP runs inside the Voicebox backend at `/mcp` using Streamable HTTP. The stdio
+shim connects to that running backend; it does not load models or launch the full
+studio itself. See the [project README](../../README.md) for backend startup.
 
-The server runs inside the same `uvicorn` process as the rest of Voicebox
-and is mounted at `/mcp` (Streamable HTTP transport).
+## Connect locally
 
-## Install into your agent
-
-Preferred — direct HTTP:
+Use your MCP client's HTTP server configuration:
 
 ```json
 {
   "mcpServers": {
     "voicebox": {
       "url": "http://127.0.0.1:17493/mcp",
-      "headers": {
-        "X-Voicebox-Client-Id": "claude-code",
-        "Authorization": "Bearer <VOICEBOX_REMOTE_API_TOKEN>"
-      }
+      "headers": { "X-Voicebox-Client-Id": "my-agent" }
     }
   }
 }
 ```
 
-Fallback — stdio shim (when the client doesn't speak HTTP MCP). The
-`voicebox-mcp` binary ships inside the Voicebox.app bundle:
+Keep the client ID stable to retain its voice binding. Settings → MCP manages
+bindings; tools can also select a profile by name or ID.
+
+For a stdio client, use the installed `voicebox-mcp` binary or this source setup:
 
 ```json
 {
   "mcpServers": {
     "voicebox": {
-      "command": "/Applications/Voicebox.app/Contents/MacOS/voicebox-mcp",
-      "env": {
-        "VOICEBOX_CLIENT_ID": "claude-code",
-        "VOICEBOX_HOST": "voicebox.example",
-        "VOICEBOX_SCHEME": "https",
-        "VOICEBOX_PORT": "443",
-        "VOICEBOX_REMOTE_API_TOKEN": "<server token>"
-      }
+      "command": "/absolute/path/to/voicebox/backend/venv/bin/python",
+      "args": ["-m", "backend.mcp_shim"],
+      "cwd": "/absolute/path/to/voicebox",
+      "env": { "VOICEBOX_CLIENT_ID": "my-agent" }
     }
   }
 }
 ```
 
-Claude Code one-liner:
-
-```
-claude mcp add voicebox \
-  --transport http \
-  --url http://127.0.0.1:17493/mcp \
-  --header "X-Voicebox-Client-Id: claude-code"
-```
+Client support for `cwd` varies; run from the checkout or use the bundled binary
+when needed. The shim defaults to host 127.0.0.1, port 17493, scheme HTTP, and waits
+up to 30 seconds for health. The backend can be a standalone server or a desktop
+sidecar configured to remain running.
 
 ## Tools
 
-| Name | Purpose |
-|---|---|
-| `voicebox.speak`          | Speak text in a voice profile. Returns a generation id you can poll. |
-| `voicebox.transcribe`     | Whisper transcription of a base64 blob or an absolute local path. |
-| `voicebox.list_captures`  | Recent captures (dictation / recording / file) with transcripts. |
-| `voicebox.list_profiles`  | Available voice profiles (cloned + preset). |
+| Tool | Inputs / result |
+| --- | --- |
+| `voicebox.speak` | Required `text`; optional `profile`, `engine`, `model_size`, `language`, `personality`. Returns generation ID and status/poll URL. |
+| `voicebox.transcribe` | Exactly one of `audio_base64` or server-local `audio_path`; optional model/language. Returns transcript metadata. |
+| `voicebox.list_profiles` | Lists profile IDs, names, types, languages, and personality availability. |
+| `voicebox.list_captures` | `limit` 1–200, nonnegative `offset`; returns captures and total. Invalid bounds are rejected. |
 
-All tools resolve voice profiles in this precedence:
+Speak profile precedence is explicit name/ID → per-client binding →
+`capture_settings.default_playback_voice_id`. A missing/invalid explicit profile
+is an error, not a fallback voice. Qwen variants accept 0.6B/1.7B and TADA 1B/3B;
+other engines ignore irrelevant sizes. Personality rewriting is optional and
+changes the spoken text before TTS.
 
-1. Explicit `profile` arg (name or id — case-insensitive)
-2. Per-client binding keyed by `X-Voicebox-Client-Id`
-3. `capture_settings.default_playback_voice_id` (global default)
+The same speech path is available without MCP:
 
-Bindings are managed via `GET|PUT /mcp/bindings` or in the app under
-Settings → MCP.
-
-The Authorization entry is required whenever either the MCP client's network
-peer or requested Host is not local. Keep it out for the default direct local
-setup; never put the token in a URL. The stdio shim reads the token from its
-environment and applies it to both health checks and MCP requests. It refuses
-to send a remote token over plain HTTP by default; set `VOICEBOX_SCHEME=https`.
-The server's
-`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1` escape hatch is intentionally unsafe
-and should not be used as a replacement for TLS.
-
-`voicebox.transcribe(audio_path=...)` can read a server-local path only when
-both the direct network peer and requested Host are local. Authenticated calls
-through a same-host reverse proxy are still remote and must upload
-`audio_base64`; bearer authentication never grants filesystem-path access.
-
-## Debug with MCP Inspector
-
-```
-npx @modelcontextprotocol/inspector http://127.0.0.1:17493/mcp
-```
-
-Point it at the URL, hit "List tools," call `voicebox.list_profiles`
-first to confirm wiring, then `voicebox.speak` for end-to-end.
-
-## Non-MCP REST surface
-
-`POST /speak` is a thin wrapper on the same code path for callers that
-don't speak MCP (shell scripts, ACP, A2A):
-
-```
-curl -X POST http://127.0.0.1:17493/speak \
+```bash
+curl --fail http://127.0.0.1:17493/speak \
   -H 'Content-Type: application/json' \
-  -H 'X-Voicebox-Client-Id: claude-code' \
-  -d '{"text":"Build complete.","profile":"Morgan"}'
+  -H 'X-Voicebox-Client-Id: my-agent' \
+  -d '{"text":"Build complete.","profile":"Narrator","personality":false}'
 ```
 
-## Code layout
+The connected desktop consumes speak events to display/play agent speech.
+History stores the generation; a headless backend does not create a native
+speaker or desktop pill on its own.
 
-```
-backend/mcp_server/
-├── __init__.py      # re-export mount_into
-├── server.py        # build_mcp_server() + mount_into(app)
-├── tools.py         # @mcp.tool() implementations
-├── context.py       # ClientIdMiddleware + current_client_id ContextVar
-├── resolve.py       # profile resolution precedence
-├── events.py        # pub/sub queue for /events/speak pill SSE
-└── README.md        # you are here
+## Remote authentication and bounds
 
-backend/mcp_shim/    # stdio ↔ Streamable-HTTP proxy (see its README)
-```
+Use an HTTPS MCP URL with `Authorization: Bearer <server token>` whenever peer
+or Host is remote. Set the server's trusted hosts/origins as appropriate.
+For the shim, set `VOICEBOX_HOST`, `VOICEBOX_PORT`, `VOICEBOX_SCHEME=https`, and
+`VOICEBOX_REMOTE_API_TOKEN`. It authenticates both health and MCP calls and refuses
+to send a remote token over plain HTTP by default. Never place tokens in a URL.
 
-The package is **`mcp_server`**, not `mcp`, to avoid shadowing the
-installed `mcp` PyPI package that FastMCP imports internally.
+Server-local `audio_path` requires both direct peer and Host to be local.
+Authenticated reverse-proxy calls remain remote and must upload base64 audio.
+Transcription bytes are limited to 200 MiB; duration/decoded-size checks also apply.
+The stdio request bound accommodates that base64 payload plus framing. JSON
+responses, incomplete SSE lines, and complete SSE events are capped at 32 MiB;
+health reads no body and HTTP error diagnostics read only a bounded prefix.
+
+## Implementation
+
+| File | Role |
+| --- | --- |
+| `backend/mcp_server/server.py` | FastMCP server and app mount/lifespan |
+| `tools.py`, `resolve.py` | Tools and profile selection |
+| `context.py` | Client identity and local-request context |
+| `events.py` | Speak event interface |
+| `backend/mcp_shim/__main__.py` | Bounded stdio/HTTP bridge |
+
+The package is named `mcp_server` to avoid shadowing the installed MCP SDK.
+For diagnostics, start with health and `voicebox.list_profiles`, then try a short
+speak request. See the generated REST reference for bindings and status routes.

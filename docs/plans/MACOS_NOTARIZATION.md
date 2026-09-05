@@ -1,5 +1,8 @@
 # macOS Notarization & Gatekeeper
 
+> **Historical design record — current status checked 2026-09-05.**
+> This is the dated 2026-04-24 diagnosis. It does not establish current notarization status; consult the current [build guide](../content/docs/developer/building.mdx) and release workflow for a specific build.
+
 **Status:** Diagnosis — Homebrew Cask CI rejects v0.4.5 on macOS 15 (Sequoia); fix pending
 **Touches:** `.github/workflows/release.yml`, Tauri bundler config, sidecar signing
 **Last reviewed:** 2026-04-24

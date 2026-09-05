@@ -1,5 +1,8 @@
 # Voicebox Cloud Roadmap
 
+> **Historical design record — current status checked 2026-09-05.**
+> Browser/device login and disconnect are implemented. Encrypted backup/sync and mobile features below remain design intent unless independently implemented; login alone does not establish those guarantees.
+
 The post-mobile commercial trajectory. Captures the strategic arc beyond `mobile/PLAN.md` — what Voicebox becomes once the mobile companion ships and we start layering optional cloud services on top of the local-first base.
 
 The desktop app stays free. Paid surface is the cloud layer, gated behind a Voicebox account, designed so the server sees as little as possible.
@@ -10,7 +13,7 @@ The desktop app stays free. Paid surface is the cloud layer, gated behind a Voic
 
 ### Phase 0 — Mobile companion (in progress)
 
-See [`mobile/PLAN.md`](../../mobile/PLAN.md). Entirely local: paired-device keys live on the iPhone, traffic goes over Tailscale or LAN, no cloud account required. This is the wedge — it establishes the device-key primitive that every later phase reuses.
+See `mobile/PLAN.md` (not present in this checkout). Entirely local: paired-device keys live on the iPhone, traffic goes over Tailscale or LAN, no cloud account required. This is the wedge — it establishes the device-key primitive that every later phase reuses.
 
 ### Phase 1 — Backup & Sync (next big feature)
 

@@ -1,109 +1,58 @@
 ---
 title: "Introduction"
-description: "Voicebox is the open-source, local-first AI voice studio — a free alternative to ElevenLabs and WisprFlow, running entirely on your machine."
+description: "What this checkout implements and where to begin"
 ---
 
-## What is Voicebox?
+## Voice studio
 
-Voicebox is the **open-source, local-first AI voice studio**. It closes the
-voice I/O loop in both directions on one machine, with no cloud and no
-accounts:
+Voicebox provides a shared React UI in a browser or a Tauri desktop window and a
+Python backend for inference and storage. Use it to create reusable voices,
+generate speech, keep versions, apply effects, and arrange clips into stories.
+The desktop adds native recording, system capture, hotkeys, and paste/output
+integration where supported by the platform.
 
-- **Humans talk** — hold a chord anywhere on your machine and your
-  dictation lands as clean text in whatever text field you had focused
-- **Agents talk back** — any MCP-aware agent can call Voicebox to speak in
-  one of your cloned voices
-- **Voices speak for themselves** — voice profiles can carry a personality
-  that composes fresh lines or rewrites text before it's spoken
+## Implemented workflows
 
-It's the free, local alternative to both ElevenLabs (voice cloning and TTS)
-and WisprFlow (voice dictation for agents and power users) — covering both
-sides of the same loop in one app, with a single model directory and LLM
-shared between input and output.
+| Workflow | Guide |
+| --- | --- |
+| Clone a voice or choose a preset | [Voice profiles](/overview/creating-voice-profiles) |
+| Queue text-to-speech and manage settings | [Generating speech](/overview/generating-speech) |
+| Retry, regenerate, apply effects, archive | [History](/overview/generation-history) |
+| Arrange a multi-voice timeline | [Stories](/overview/stories-editor) |
+| Record/transcribe, refine, replay captures | [Captures](/overview/captures) |
+| Global push-to-talk / toggle dictation | [Dictation](/overview/dictation) |
+| Compose or rewrite with a profile personality | [Personalities](/overview/voice-personalities) |
+| Give an agent voice tools | [MCP](/overview/mcp-server) |
 
-## What's in the app
+## Models
 
-- **Dictation** — global hotkey, push-to-talk and toggle modes, auto-paste
-  into the focused field on macOS and Windows (see [Dictation](/overview/dictation))
-- **Captures tab** — paired audio + transcript archive, retranscribe,
-  refine, play-as-voice, promote-to-sample (see [Captures](/overview/captures))
-- **Voice cloning** — 5 cloning engines covering 23 languages. Zero-shot
-  cloning from a reference sample (see [Voice Cloning](/overview/voice-cloning))
-- **Preset voices** — 50+ curated voices via Kokoro and Qwen CustomVoice
-  for when you don't want to clone (see [Preset Voices](/overview/preset-voices))
-- **Voice personalities** — optional free-form personality on any profile
-  plus a compose button and persona-rewrite toggle powered by a local LLM (see
-  [Voice Personalities](/overview/voice-personalities))
-- **Post-processing effects** — pitch shift, reverb, delay, chorus,
-  compression, filters (Spotify's Pedalboard)
-- **Expressive speech** — paralinguistic tags like `[laugh]` and `[sigh]`
-  via Chatterbox Turbo; natural-language delivery control via Qwen CustomVoice
-- **Unlimited length** — auto-chunking with crossfade for long scripts
-- **Stories editor** — multi-track timeline for conversations and podcasts
-- **API-first** — REST + WebSocket API; MCP server for agent integrations
-- **Runs everywhere** — macOS (MLX/Metal), Windows (CUDA / DirectML), Linux
-  (ROCm / CPU), Intel Arc, Docker
+| Engine | Profile kind | Model choices |
+| --- | --- | --- |
+| Qwen3-TTS | Cloned | 0.6B / 1.7B |
+| Qwen CustomVoice | Preset | 0.6B / 1.7B |
+| LuxTTS | Cloned | Registered engine variant |
+| Chatterbox Multilingual | Cloned | Registered multilingual variant |
+| Chatterbox Turbo | Cloned | Registered Turbo variant |
+| TADA | Cloned | 1B / 3B |
+| Kokoro | Preset | Registered 82M engine |
 
-## TTS Engines
+Language, instruction, preset, and device support vary by engine; use the choices
+shown for that engine. Whisper Base/Small/Medium/Large/Turbo handle transcription.
+A local Qwen3 LLM provides refinement and personality text generation.
 
-Seven engines with different strengths, switchable per-generation:
+MLX uses Metal on supported Apple Silicon models. Other engines use their
+configured PyTorch/device paths. Model size or precision changes can change
+quality; no universal speed multiplier applies to all hardware and workflows.
 
-| Engine | Profile Type | Languages | Strengths |
-|--------|--------------|-----------|-----------|
-| **Qwen3-TTS** (0.6B / 1.7B) | Cloned | 10 | High-quality multilingual cloning |
-| **Qwen CustomVoice** (0.6B / 1.7B) | Preset (9 voices) | 10 | Natural-language delivery control (tone, emotion, pace) |
-| **LuxTTS** | Cloned | English | Lightweight (~1GB VRAM), 48kHz output, 150x realtime on CPU |
-| **Chatterbox Multilingual** | Cloned | 23 | Broadest language coverage |
-| **Chatterbox Turbo** | Cloned | English | Fast 350M model with paralinguistic emotion/sound tags |
-| **TADA** (1B / 3B) | Cloned | 10 | HumeAI speech-language model — 700s+ coherent audio |
-| **Kokoro** | Preset (50 voices) | 9 | 82M parameters, CPU realtime, lowest VRAM of any engine |
+## Data and connections
 
-## STT and local LLM
+Local processing does not require a cloud account. Explicit remote mode sends
+inputs to the selected backend, and cloud login uses the configured cloud service.
+The presence of login does not mean the proposed encrypted backup/sync roadmap is
+implemented. See [remote mode](/overview/remote-mode) and
+[storage and backup](/overview/storage-and-backup).
 
-Voicebox also runs a full speech recognition and local LLM stack, shared
-between dictation, the Captures tab, and per-profile personality modes:
-
-| Layer | Models |
-|---|---|
-| **STT** | Whisper Base / Small / Medium / Large / Turbo (PyTorch or MLX) |
-| **LLM** | Qwen3 0.6B / 1.7B / 4B (refinement + per-profile compose / persona-rewrite) |
-
-No cloud fallback, no bring-your-own-API-key. Local is the product.
-
-## GPU Support
-
-| Platform | Backend | Notes |
-|----------|---------|-------|
-| macOS (Apple Silicon) | MLX (Metal) | 4-5x faster via Neural Engine |
-| Windows (NVIDIA)         | PyTorch (CUDA) | Auto-downloads CUDA binary from within the app |
-| Linux (NVIDIA)           | PyTorch (CUDA) | Use a local/remote Python backend with CUDA PyTorch |
-| Linux (AMD) | PyTorch (ROCm) | Auto-configures HSA_OVERRIDE_GFX_VERSION |
-| Windows (any GPU) | DirectML | Universal Windows GPU support |
-| Intel Arc | IPEX/XPU | Intel discrete GPU acceleration |
-| Any | CPU | Works everywhere, just slower |
-
-## Use Cases
-
-- **Dictation for humans and agents** — speak instead of type, in any app
-- **Agent voice output** — any MCP-aware agent can speak in a cloned voice
-- **Game development** — generate dynamic dialogue for characters
-- **Content creation** — podcasts, video voiceovers, audiobooks
-- **Accessibility** — speech-to-text for any field, TTS with a voice you own
-- **Voice assistants** — custom voice interfaces without a cloud bill
-- **Production pipelines** — automate voice workflows via the REST API
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Desktop App | Tauri (Rust) |
-| Frontend | React, TypeScript, Tailwind CSS |
-| State | Zustand, React Query |
-| Backend | FastAPI (Python) |
-| TTS Engines | Qwen3-TTS, Qwen CustomVoice, LuxTTS, Chatterbox, Chatterbox Turbo, TADA, Kokoro |
-| STT | Whisper / Whisper Turbo (PyTorch or MLX) |
-| Local LLM | Qwen3 0.6B / 1.7B / 4B (MLX or PyTorch) |
-| Effects | Pedalboard (Spotify) |
-| Inference | MLX (Apple Silicon) / PyTorch (CUDA/ROCm/XPU/CPU) |
-| Database | SQLite |
-| Audio | WaveSurfer.js, librosa |
+For this fork, the repository README is the current operating guide. Upstream
+downloads and the configured updater do not necessarily contain fork changes.
+The private audiobook tools are a separate ignored local workspace described in
+`docs/AUDIOBOOKS.md`; they add frozen book jobs and final chaptered containers.

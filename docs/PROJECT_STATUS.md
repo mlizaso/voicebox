@@ -1,3 +1,48 @@
+# Voicebox project status
+
+Current checkout reviewed on 2026-09-05, after `8c6a3cf`. Use the
+[README](../README.md) for running the project and finding profiles/audio, and
+[architecture](content/docs/developer/architecture.mdx) for code ownership.
+
+## Current functionality
+
+| Area | Implemented in this checkout |
+| --- | --- |
+| Voices | Cloned/preset profiles, reference samples/transcripts, avatars, personality/effects, portable ZIPs |
+| TTS | Seven engine families, validated variants, serial durable queue, history/takes/effects, supported streaming |
+| Replay | Saved chunk/crossfade/normalization settings; exact voice/request/runtime guards |
+| Composition | Stories with timeline edits and version pins; bounded disk-backed WAV export |
+| Input | Captures, Whisper transcription, refinement, native dictation and capture/output adapters |
+| Agents | Four MCP tools, per-client bindings, speak events, bounded stdio bridge |
+| Models | Download/load/unload/delete/migration, MLX/CUDA/ROCm and other configured runtime paths |
+| Connections | Local/remote backend selection, HTTPS/bearer and Host/origin checks, isolated media/state |
+| Cloud | Browser/device login, status, callback validation, disconnect; roadmap backup/sync is not established by login |
+| Private books | Separate ignored local wizard, narrator demos, frozen jobs, validated resume and mastered book outputs |
+| Developer structure | Shared UI/platform contract, handwritten API client, backend routes/services/database/engine boundaries |
+
+The application version remains 0.5.0 while the fork contains later commits.
+Upstream downloads/updater do not necessarily contain these changes. This checkout
+does not expose the proposed `/v1/audio/*` compatibility API or ship a built-in
+EPUB/audiobook tab. The private book tools are not part of a fresh Git clone.
+
+## Latest hardening and validation
+
+The two recent audits removed legacy UI/client duplication, hardened request,
+archive, cloud/native/media boundaries, prevented destructive model-cache
+replacement, and preserved generation settings/provenance. The
+[audit report](SECURITY_AUDIT_2026-09-05.md) records the full evidence and remaining
+dependency/platform limits. Numerical audio modules and model weights were
+preserved in the last pass; a complete 13-hour render was not rebenchmarked.
+
+## Historical upstream roadmap snapshot
+
+The material below is preserved from the upstream 2026-06-27 planning snapshot.
+Its issue/PR status, candidate-model claims, deadlines, counts, and suggested
+commands are historical, not current operational guidance. Use the current
+guides above; recheck upstream before acting on this roadmap.
+
+---
+
 # Voicebox Project Status & Roadmap
 
 > Last updated: 2026-07-02 | Current version: **v0.5.0** | 402 open issues | 88 open PRs | 1.3M downloads · 34.8k stars

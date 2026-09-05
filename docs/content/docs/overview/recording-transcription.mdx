@@ -31,7 +31,7 @@ Covered end-to-end in [Dictation](/overview/dictation).
 
 When you don't need to paste into another app — you just want a clean
 transcript of some audio — the Captures tab is the home. Record in-app,
-drop in a file (`.wav`, `.mp3`, `.m4a`, `.webm`, `.opus`, `.flac`), or dig
+drop in a file (`.wav`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.flac`), or dig
 through dictations that already landed there. Every capture keeps its
 original audio, can be retranscribed with a different model, and can be
 played back through any voice profile you have.
@@ -41,13 +41,13 @@ Covered in [Captures](/overview/captures).
 ## Voice profile samples
 
 A separate flow, in the Voices tab. When you're creating a profile from an
-audio clip, the sample is what the cloning engine actually learns from —
+audio clip, the sample conditions the cloning engine —
 the `reference_text` on a sample must match the audio *verbatim*, which is
 why samples are a different data model from captures.
 
-You can promote a capture to a sample from the Captures tab's Send-to menu
-("Use as voice sample…"), which opens a reference-text confirm dialog so
-you can correct the last ~10% of transcript accuracy before saving.
+To use capture audio as a reference, export its WAV and upload a suitable excerpt
+to the voice profile. Check the transcript against the audio and keep the sample
+within the 30-second profile limit.
 
 Covered in [Creating Voice Profiles](/overview/creating-voice-profiles).
 
@@ -59,15 +59,15 @@ to.
 
 | Model | Size | When to pick it |
 |---|---|---|
-| Whisper Base | ~300 MB | Fast. Default. Good for clean speech. |
+| Whisper Base | ~300 MB | Smaller model; compare accuracy on your recordings. |
 | Whisper Small | ~500 MB | Better quality, still fast. |
 | Whisper Medium | ~1.5 GB | High quality. |
 | Whisper Large | ~3 GB | Best quality, slow on CPU. |
-| Whisper Turbo | ~1.5 GB | Large-tier quality, ~5× faster than Large. |
+| Whisper Turbo | ~1.5 GB | Default for new capture settings; compare accuracy on your recordings. |
 
-On Apple Silicon the model runs through **MLX-Whisper** (~8× faster than
-PyTorch). Everywhere else it runs through PyTorch `transformers`. The
-backend picks the right one — you don't configure it.
+On supported Apple Silicon installations, transcription uses the MLX path;
+other installations use the PyTorch backend. Check the selected runtime and
+compare the same recording before assuming a speed or accuracy difference.
 
 <Callout type="info">
   For noisy clips, prefer **Turbo** or **Large**. Base can hallucinate on
@@ -88,7 +88,7 @@ Developer-level detail on the STT backend, model loading, preprocessing, and
 the `/transcribe` endpoint lives in the
 [Transcription developer guide](/developer/transcription). The Captures
 pipeline also exposes `/captures` as a higher-level endpoint that wraps
-STT + archival + optional refinement in one call — see
+STT and archival, with optional refinement requested separately — see
 [Captures](/overview/captures#api-surface).
 
 ## Next steps

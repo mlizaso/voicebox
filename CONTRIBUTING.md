@@ -1,384 +1,143 @@
 # Contributing to Voicebox
 
-Thank you for your interest in contributing to Voicebox! This document provides guidelines and instructions for contributing.
+Start with the [README](README.md) for daily operation, data locations, and the
+[project structure](README.md#project-structure). This guide covers developing
+and validating this fork. Be respectful, explain concrete behavior, and keep
+changes focused and reviewable.
 
-## Code of Conduct
+## Prerequisites and setup
 
-- Be respectful and inclusive
-- Welcome newcomers and help them learn
-- Focus on constructive feedback
-- Respect different viewpoints and experiences
-
-## Getting Started
-
-### Prerequisites
-
-- **[Bun](https://bun.sh)** - Fast JavaScript runtime and package manager
-  ```bash
-  curl -fsSL https://bun.sh/install | bash
-  ```
-
-- **[Python 3.11+](https://python.org)** - For backend development
-  ```bash
-  python --version  # Should be 3.11 or higher
-  ```
-
-- **[Rust](https://rustup.rs)** - For Tauri desktop app (installed automatically by Tauri CLI)
-  ```bash
-  rustc --version  # Check if installed
-  ```
-- **[Tauri Prerequisites](https://v2.tauri.app/start/prerequisites)** - Tauri-specific system dependencies (varies by OS).
-
-- **Git** - Version control
-
-### Development Setup
-
-Install [just](https://github.com/casey/just) (`brew install just`, `cargo install just`, or `winget install Casey.Just`), then:
+- Python 3.12+; the setup recipe prefers 3.12/3.13 for ML compatibility.
+- Bun for the shared `app`, `web`, `tauri`, and `landing` workspace.
+- `just` for repository recipes. On macOS it can be installed with Homebrew;
+  `cargo install just` is another supported installation route.
+- Rust plus native build tools for Tauri. Rust is not installed automatically
+  by the Tauri CLI. macOS builds need Xcode, including the tools used by `actool`.
+  Windows needs the MSVC/native desktop prerequisites; Linux needs the WebKitGTK,
+  GTK, audio, and desktop packages used by its build configuration.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/voicebox.git
+git clone https://github.com/mlizaso/voicebox.git
 cd voicebox
-
-just setup   # creates venv, installs Python + JS deps
-just dev     # starts backend + desktop app
+just setup
+just dev
 ```
 
-`just setup` handles everything automatically, including:
-- Creating a Python virtual environment
-- Installing Python dependencies (with CUDA PyTorch on Windows if an NVIDIA GPU is detected)
-- Installing MLX dependencies on Apple Silicon
-- Installing JavaScript dependencies
+`just setup-python` creates `backend/venv` and handles engine dependencies with
+conflicting upstream pins. It detects relevant GPU packages, installs the pinned
+Apple Silicon MLX stack, and installs pytest/Ruff/build tools. `just setup-js`
+runs the main Bun workspace install. The separate `docs/` workspace needs its own
+install. The private ignored `voice-profile/` tree is not supplied by cloning.
 
-`just dev` starts the backend and desktop app together. If a backend is already running (e.g. from `just dev-backend` in another terminal), it detects it and only starts the frontend.
+For reproducible JavaScript installs, use `bun install --frozen-lockfile` at the
+repository root and separately in `docs/`. Do not blindly upgrade Transformers,
+MLX, or engine packages: generation revision checks intentionally bind their
+compatibility and numerical behavior.
 
-Other useful commands:
+## Development commands
+
+| Command | Behavior |
+| --- | --- |
+| `just dev` | Backend reload server and desktop development UI |
+| `just dev-web` | Backend reload server and browser UI |
+| `just dev-backend` | Backend only on port 17493 |
+| `just dev-frontend` / `bun run dev` | Desktop dev UI against an existing backend |
+| `bun run dev:web` | Browser client only |
+| `bun run dev:landing` | Public landing site, normally on port 3000 |
+| `just --list` | Full available recipe list |
+
+An occupied backend port requires an explicit desktop connection action. Source
+development launched from the root uses `./data`; a packaged sidecar uses the
+OS app-data path. For real generation, use the stable `python -m backend.main`
+command in the README, with explicit `--port` and `--data-dir`, without reload.
+
+## Ownership boundaries
+
+- Shared React code is in `app/`. Use `app/src/platform/` contracts for filesystem,
+  capture, playback, dialogs, and native operations; import Tauri APIs only in the
+  desktop adapter. Biome's restricted-import gate checks this boundary.
+- `app/src/lib/api/` is the handwritten client. API/media calls must preserve the
+  selected connection, bearer authentication, cancellation, and bounded downloads.
+  `ServerImage` is the common private-avatar component.
+- Backend routes validate and coordinate requests; services own reusable business
+  operations. The engine registry describes supported engines and model sizes.
+- Database changes need additive, repeatable migrations and compatibility with
+  old rows. Keep audio publication and recovery consistent with database ownership.
+- Audio/model changes need checks appropriate to the engine. Never weaken exact
+  identity guards, discard completed audio, or alter quality settings just to make
+  an optimization or a test pass.
+
+See [backend architecture](backend/README.md), [Python style](backend/STYLE_GUIDE.md),
+and [adding an engine](docs/content/docs/developer/tts-engines.mdx).
+
+## Validation
+
+Use the narrow checks for the changed area first, then the relevant integration
+gates. These are separate checks: `just check` does not replace TypeScript checks
+or test execution.
 
 ```bash
-just dev-web       # backend + web app (no Tauri/Rust build)
-just dev-backend   # backend only
-just dev-frontend  # Tauri app only (backend must be running)
-just kill          # stop all dev processes
-just clean-all     # nuke everything and start fresh
-just --list        # see all available commands
+# Shared tests, import boundary, TypeScript, web + desktop frontend builds
+bun run ci
+
+# Python regressions, lint, and formatting
+backend/venv/bin/python -m pytest backend/tests -q
+backend/venv/bin/ruff check backend
+backend/venv/bin/ruff format --check backend
+
+# Full frontend lint/format checks (existing baseline debt remains)
+bun run check
+
+# Native desktop
+cargo test --manifest-path tauri/src-tauri/Cargo.toml --bin voicebox
+cargo check --manifest-path tauri/src-tauri/Cargo.toml --all-targets
+cargo fmt --manifest-path tauri/src-tauri/Cargo.toml --check
+
+# Landing
+bun run --cwd landing test
+bun run build:landing
 ```
 
-> **Note:** In dev mode, the app connects to a manually-started Python server.
-> The bundled server binary is only used in production builds.
-
-#### Windows Notes
-
-The justfile works natively on Windows via PowerShell. No WSL or Git Bash required. On Windows with an NVIDIA GPU, `just setup` automatically installs CUDA-enabled PyTorch for GPU acceleration.
-
-### Model Downloads
-
-Models are automatically downloaded from HuggingFace Hub on first use:
-- **Whisper** (transcription): Auto-downloads on first transcription
-- **Qwen3-TTS** (voice cloning): Auto-downloads on first generation (~2-4GB)
-
-First-time usage will be slower due to model downloads, but subsequent runs will use cached models.
-
-### Building
-
-**Build production app:**
-
-```bash
-just build        # Build CPU server binary + Tauri installer
-```
-
-On Windows, to build with CUDA support for local testing:
-
-```bash
-just build-local  # Build CPU + CUDA server binaries + Tauri installer
-```
-
-This builds the CPU sidecar (bundled with the app), the CUDA binary (placed in `%APPDATA%/sh.voicebox.app/backends/` for runtime GPU switching), and the installable Tauri app.
-
-Creates platform-specific installers (`.dmg`, `.msi`, `.AppImage`) in `tauri/src-tauri/target/release/bundle/`.
-
-**Individual build targets:**
-
-```bash
-just build-server       # CPU server binary only
-just build-server-cuda  # CUDA server binary only (Windows)
-just build-tauri        # Tauri desktop app only
-just build-web          # Web app only
-```
-
-**Building with local Qwen3-TTS development version:**
-
-If you're actively developing or modifying the Qwen3-TTS library, set the `QWEN_TTS_PATH` environment variable to point to your local clone:
-
-```bash
-export QWEN_TTS_PATH=~/path/to/your/Qwen3-TTS
-just build-server
-```
-
-This makes PyInstaller use your local qwen-tts version instead of the pip-installed package.
-
-### Convert Assets to Web Formats
-
-To optimize images and videos for the web, run:
-```bash
-bun run convert:assets
-```
-
-This script:
-- Converts PNG → WebP (better compression, same quality)
-- Converts MOV → WebM (VP9 codec, smaller file size)
-- Processes files in `landing/public/` and `docs/public/`
-- **Deletes original files** after successful conversion
-
-**Requirements:** Install `webp` and `ffmpeg`:
-```bash
-brew install webp ffmpeg
-```
-
-> **Note:** Run this before committing new images or videos to keep the repository size small.
-
-## Development Workflow
-
-### 1. Create a Branch
-
-```bash
-git checkout -b feature/your-feature-name
-# or
-git checkout -b fix/your-bug-fix
-```
-
-### 2. Make Your Changes
-
-- Write clean, readable code
-- Follow existing code style
-- Add comments for complex logic
-- Update documentation as needed
-
-### 3. Test Your Changes
-
-- Test manually in the app
-- Ensure backend API endpoints work
-- Check for TypeScript/Python errors
-- Verify UI components render correctly
-
-### 4. Commit Your Changes
-
-Write clear, descriptive commit messages:
-
-```bash
-git commit -m "Add feature: voice profile export"
-git commit -m "Fix: audio playback stops after 30 seconds"
-```
-
-### 5. Push and Create Pull Request
-
-```bash
-git push origin feature/your-feature-name
-```
-
-Then create a pull request on GitHub with:
-- Clear description of changes
-- Screenshots (for UI changes)
-- Reference to related issues
-
-## Code Style
-
-### TypeScript/React
-
-- Use TypeScript strict mode
-- Follow React best practices
-- Use functional components with hooks
-- Prefer named exports
-- Format with Biome (runs automatically)
-
-```typescript
-// Good
-export function ProfileCard({ profile }: { profile: Profile }) {
-  return <div>{profile.name}</div>;
-}
-
-// Avoid
-export const ProfileCard = (props) => { ... }
-```
-
-### Python
-
-- Follow PEP 8 style guide
-- Use type hints
-- Use async/await for I/O operations
-- Format with Black (if configured)
-
-```python
-# Good
-async def create_profile(name: str, language: str) -> Profile:
-    """Create a new voice profile."""
-    ...
-
-# Avoid
-def create_profile(name, language):
-    ...
-```
-
-### Rust
-
-- Follow Rust conventions
-- Use meaningful variable names
-- Handle errors explicitly
-- Format with `rustfmt`
-
-## Project Structure
-
-```
-voicebox/
-├── app/              # Shared React frontend
-│   └── src/
-│       ├── components/   # UI components
-│       ├── lib/          # Utilities and API client
-│       └── hooks/        # React hooks
-├── backend/          # Python FastAPI server
-│   ├── main.py       # API routes
-│   ├── tts.py        # Voice synthesis
-│   └── ...
-├── tauri/            # Desktop app wrapper
-│   └── src-tauri/    # Rust backend
-└── scripts/          # Build scripts
-```
-
-## Areas for Contribution
-
-### 🐛 Bug Fixes
-
-- Check existing issues for bugs to fix
-- Test your fix thoroughly
-- Add tests if possible
-
-### ✨ New Features
-
-- Check the roadmap in README.md and the engineering status in [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) before proposing work — it lists prioritized tasks (Tier 1 → 3), known architectural bottlenecks, and candidate TTS engines already under evaluation (including why some have been backlogged)
-- Discuss major features in an issue first
-- Keep features focused and well-scoped
-
-### 📚 Documentation
-
-- Improve README clarity
-- Add code comments
-- Write API documentation
-- Create tutorials or guides
-
-### 🎨 UI/UX Improvements
-
-- Improve accessibility
-- Enhance visual design
-- Optimize performance
-- Add animations/transitions
-
-### 🔧 Infrastructure
-
-- Improve build process
-- Add CI/CD improvements
-- Optimize bundle size
-- Add testing infrastructure
-
-## API Development
-
-When adding new API endpoints:
-
-1. **Add route in `backend/main.py`**
-2. **Create Pydantic models in `backend/models.py`**
-3. **Implement business logic in appropriate module**
-4. **Update OpenAPI schema** (automatic with FastAPI)
-5. **Update the app API client** in `app/src/lib/api/client.ts` and `types.ts` when the app consumes the endpoint.
-6. **Update `backend/README.md`** with endpoint documentation
-
-## Testing
-
-Run the checks for the code you change:
-
-- **Backend**: `backend/venv/bin/python -m pytest backend/tests`; use the backend Ruff configuration for linting and formatting.
-- **App, web, and desktop frontend**: `bun run ci` runs Bun tests, import-boundary checks, TypeScript checks, and production builds. App tests are also typechecked.
-- **Landing page**: `bun run --cwd landing test` and `bun run build:landing`.
-- **Documentation**: `bun run --cwd docs test` and `bun run --cwd docs build`.
-- **Native desktop**: run `cargo check --all-targets` and `cargo test --bin voicebox` in `tauri/src-tauri`. Hardware capture, playback, and packaged sidecar checks require the target OS and are separate from these unit tests.
-
-See [the September 2026 audit](docs/SECURITY_AUDIT_2026-09-05.md) for known dependency constraints and validation limits.
-
-## Pull Request Process
-
-1. **Update documentation** if needed
-2. **Ensure code follows style guidelines**
-3. **Test your changes thoroughly**
-4. **Update CHANGELOG.md** with your changes
-5. **Request review** from maintainers
-
-### PR Checklist
-
-- [ ] Code follows style guidelines
-- [ ] Documentation updated
-- [ ] Changes tested
-- [ ] No breaking changes (or documented)
-- [ ] CHANGELOG.md updated
-
-## Release Process
-
-Releases are managed by maintainers:
-
-1. **Bump version using bumpversion:**
-   ```bash
-   # Install bumpversion (if not already installed)
-   pip install bumpversion
-   
-   # Bump patch version (0.1.0 -> 0.1.1)
-   bumpversion patch
-   
-   # Or bump minor version (0.1.0 -> 0.2.0)
-   bumpversion minor
-   
-   # Or bump major version (0.1.0 -> 1.0.0)
-   bumpversion major
-   ```
-   
-   This automatically:
-   - Updates version numbers in all files (`tauri.conf.json`, `Cargo.toml`, all `package.json` files, `backend/main.py`)
-   - Creates a git commit with the version bump
-   - Creates a git tag (e.g., `v0.1.1`, `v0.2.0`)
-
-2. **Update CHANGELOG.md** with release notes
-
-3. **Push commits and tags:**
-   ```bash
-   git push
-   git push --tags
-   ```
-
-4. **GitHub Actions builds and releases** automatically when tags are pushed
-
-## Troubleshooting
-
-See [docs/content/docs/overview/troubleshooting.mdx](docs/content/docs/overview/troubleshooting.mdx) for common issues and solutions.
-
-**Quick fixes:**
-
-- **Backend won't start:** Check Python version (3.11+), ensure venv is activated, install dependencies
-- **Tauri build fails:** Ensure Rust is installed, clean build with `cd tauri/src-tauri && cargo clean`
-
-## Questions?
-
-- Open an issue for bugs or feature requests
-- Check existing issues and discussions
-- Review the codebase to understand patterns
-- See [docs/content/docs/overview/troubleshooting.mdx](docs/content/docs/overview/troubleshooting.mdx) for common issues
-
-## Additional Resources
-
-- [README.md](README.md) - Project overview
-- [backend/README.md](backend/README.md) - API documentation
-- [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) - Living engineering roadmap: architecture, shipped vs in-flight work, prioritized open issues, candidate TTS engines under evaluation, architectural bottlenecks. Keep this updated when you ship significant features, close or backlog a model integration, or identify new bottlenecks.
-- [docs/AUTOUPDATER_QUICKSTART.md](docs/AUTOUPDATER_QUICKSTART.md) - Auto-updater setup
-- [SECURITY.md](SECURITY.md) - Security policy
-- [CHANGELOG.md](CHANGELOG.md) - Version history
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
-
----
-
-Thank you for contributing to Voicebox! 🎉
+On this Mac, native builds may need
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` so `actool` uses Xcode.
+Metal/native checks need access to the host runtime. Synthetic tests do not
+replace microphone/paste/output checks or frozen-build/model testing on each OS.
+Whole-tree Ruff/Biome/rustfmt have known pre-existing findings; report the baseline
+and keep changed code clean rather than adding suppressions or reformatting unrelated code.
+
+Documentation has its own [build and API-generation workflow](docs/README.md).
+Real model tests are opt-in; see [backend/tests/README.md](backend/tests/README.md).
+
+## Builds and release work
+
+| Command | Output |
+| --- | --- |
+| `just build` | Server sidecars and Tauri installer |
+| `just build-server` | Platform server/MCP sidecars |
+| `just build-tauri` | Desktop bundle using prepared sidecars |
+| `just build-web` | Browser build in `web/dist/` |
+| `just build-local` | Windows CPU/CUDA sidecars and installer |
+| `just build-server-cuda` | Windows CUDA sidecar for local testing |
+
+Installers are placed under `tauri/src-tauri/target/release/bundle/`. `scripts/`
+and `.github/workflows/release.yml` define packaging details; use
+[the build guide](docs/content/docs/developer/building.mdx) for frozen dependencies.
+The updater remains configured for upstream releases unless deliberately changed.
+
+Update only `[Unreleased]` in `CHANGELOG.md` during ordinary work. The local
+`draft-release-notes` skill helps collect real changes. Version stamping/tagging
+belongs to the separate release workflow. Never publish signing material, private
+voice samples, database files, or tokens.
+
+## Submit a change
+
+Create a focused branch, explain the concrete before/after behavior, and include
+the checks actually run plus any limitations. Follow recent commit style, for
+example `fix(history): preserve generation settings on retry`. Avoid unrelated
+formatting and dependencies. Describe a regression with a failing scenario and a
+test that would fail without the fix.
+
+Keep the README current when commands, storage, or user workflows change. Update
+the relevant MDX guide and regenerate the API snapshot when request/response
+schemas change. Dated audits, benchmarks, release history, and design proposals
+are evidence for their stated revision, not substitutes for current usage docs.

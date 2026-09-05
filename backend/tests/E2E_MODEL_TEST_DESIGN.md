@@ -1,5 +1,8 @@
 # End-to-End Model Generation Test — Design
 
+> Original design record. The runner is implemented in `test_all_models_e2e.py`;
+> use [the test guide](README.md) and its current `--help` for supported flags and prerequisites.
+
 ## Goal
 
 A single script, runnable on macOS and Windows, that exercises every TTS model against the **frozen PyInstaller binary** (not the dev server), captures per-model pass/fail and error messages, and exits non-zero if any model fails. Generation is strictly sequential — one model loaded at a time.

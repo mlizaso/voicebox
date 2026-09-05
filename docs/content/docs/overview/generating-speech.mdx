@@ -1,65 +1,64 @@
 ---
 title: "Generating Speech"
-description: "Generate high-quality speech from text"
+description: "Queue speech, preserve settings, and understand output quality"
 ---
 
-## Basic Generation
+## Generate
 
-<Steps>
-  <Step title="Select Profile">
-    Choose a voice profile from the dropdown
-  </Step>
-  <Step title="Enter Text">
-    Type or paste your text
-  </Step>
-  <Step title="Generate">
-    Click **Generate** and wait a few seconds
-  </Step>
-  <Step title="Play & Export">
-    Preview and download the result
-  </Step>
-</Steps>
+Choose a voice, compatible engine/model, language, and text in the generation
+form. Review delivery instructions, personality rewriting, and effects, then
+click **Generate**. The durable request enters a serial queue; history and its
+status stream show completion or an actionable failure.
 
-## Text Formatting Tips
+First use includes model download/load time. There is no fixed seconds-per-book
+promise: generation depends on text length, engine, reference, and hardware.
+Keep the model loaded and use a stable backend without development reloads.
 
-The way you format text affects the output quality.
+## Text and delivery
 
-### Punctuation
+- Preserve punctuation and review source text before generation.
+- Plain text is the input contract. Markdown emphasis and SSML are not guaranteed
+  controls; markers can be spoken literally.
+- Delivery instructions depend on the engine. Chatterbox Turbo exposes supported
+  paralinguistic tags through the `/` inserter; do not assume every engine interprets them.
+- Personality rewriting changes the words through the local LLM. Leave it off for
+  verbatim book narration.
+- Listen to a representative sample before a large job. Altering references,
+  model size, precision, seed, chunking, or effects can change perceived quality.
 
-Use proper punctuation for natural pauses:
+## Chunking and settings
 
-```
-Good: "Hello! How are you today? I'm doing great."
-Bad: "Hello how are you today Im doing great"
-```
+| Setting | Default | Supported bounds |
+| --- | --- | --- |
+| Request text | Required | 1–50,000 characters |
+| `max_chunk_chars` | 800 | 100–5,000 |
+| `crossfade_ms` | 50 | 0–500 |
+| `normalize` | `true` | Boolean |
+| `seed` | Unspecified | Integer 0–4,294,967,295 when supplied |
 
-### Emphasis
+The normal path splits long text and joins model chunks with the configured
+crossfade. The private audiobook renderer has its own frozen planning contract;
+changing the studio defaults does not rewrite an existing saved book.
 
-Use formatting to suggest emphasis:
+## History and replay
 
-```
-- ALL CAPS for louder/emphasized: "That was AMAZING!"
-- Italics for subtle emphasis: "I *really* enjoyed that"
-- Bold for strong emphasis: "This is **very** important"
-```
+New records retain chunk size, crossfade, and normalization. Retry repeats a
+failed request with its stored seed. Regenerate creates a fresh take while
+retaining stored delivery settings; old NULL fields retain legacy defaults.
+Direct audio imports cannot be retried or regenerated as TTS.
 
-<Callout type="info">
-  The model interprets these hints but results may vary.
-</Callout>
+Effects produce versions with lineage; select the version you want to play or
+export. Use ZIP export for audio plus metadata, or audio-only download for a player.
+See [history](/overview/generation-history) and [storage](/overview/storage-and-backup).
 
-## Advanced Features
+## API and exact generation
 
-### Batch Generation
+`POST /generate` returns a durable generation record. Follow
+`GET /generate/{id}/status` or poll `GET /history/{id}` before requesting
+`GET /audio/{id}`. `POST /generate/stream` is available for supported streaming
+backends; it is a separate contract from the durable history queue.
 
-For long-form content, split into smaller chunks for better control and faster processing.
-
-### Voice Caching
-
-Voicebox caches voice prompts for faster re-generation with the same profile.
-
-## Coming Soon
-
-- Real-time streaming
-- Word-level timing control
-- Emotion and style controls
-- SSML support
+Exact routes (`/generate/exact`, `/generate/batch/exact`,
+`/generate/stream/exact`) enforce the pinned voice/request/runtime contract used
+by resumable callers. A mismatched revision is rejected, not silently mixed with
+older audio. See [TTS internals](/developer/tts-generation).

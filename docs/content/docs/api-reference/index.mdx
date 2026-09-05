@@ -1,0 +1,35 @@
+---
+title: "API Reference"
+description: "Current backend operations, authentication, and asynchronous generation"
+---
+
+This reference is generated from this checkout's backend schema. The running
+server's `/docs` and `/openapi.json` are authoritative for its installed revision.
+Operation pages are grouped by route family, including generations, profiles,
+history, captures, stories, models, agents, settings, and cloud login.
+
+## Connection and authentication
+
+The default development API is `http://127.0.0.1:17493`; the private audiobook
+launcher normally uses 17494, and supplied Docker Compose publishes host 17600.
+Remote requests require HTTPS and `Authorization: Bearer <token>`, plus configured
+trusted Host/browser-origin allowlists. These middleware checks apply even where
+an individual operation's generated schema does not show an authentication field.
+See [remote mode](/overview/remote-mode) and [Docker](/overview/docker).
+
+## Generate and fetch
+
+`POST /generate` accepts text/profile/settings and returns a durable record.
+Follow `/generate/{generation_id}/status` or poll history until completed before
+fetching `/audio/{generation_id}`. A successful submission is not completed audio.
+The streaming and exact endpoints have separate contracts; see
+[TTS generation](/developer/tts-generation).
+
+For transcription use multipart `file`, optional `model`, and optional `language`.
+Use model selectors such as `turbo`, not `whisper-turbo` or a `model_size` form field.
+
+## Regenerate these pages
+
+Refresh `docs/openapi.json` from the backend, then run
+`bun scripts/generate-openapi.ts` in `docs/`. Commit the snapshot, operation pages,
+and navigation together. See `docs/README.md` for the full maintenance procedure.

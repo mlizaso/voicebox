@@ -1,286 +1,96 @@
 ---
 title: "Architecture"
-description: "Understanding Voicebox's technical architecture"
+description: "Source ownership, request flow, storage, and runtime boundaries"
 ---
 
-## System Overview
+## System overview
 
-Voicebox uses a client-server architecture with a React frontend and Python backend. The desktop app is built with Tauri and contains two main layers:
+The shared React studio runs in a browser (`web/`) or Tauri desktop (`tauri/`).
+Both use a FastAPI backend with SQLite and pluggable TTS/STT/LLM implementations.
+HTTP carries API and media requests; event streams carry progress. Packaged
+desktop builds launch a PyInstaller sidecar, while development normally starts
+the Python module explicitly.
 
-**Frontend Layer:** A React application that handles the UI components, state management with Zustand, and data fetching with React Query (TanStack Query).
-
-**Backend Layer:** A Python FastAPI server that hosts the REST API, runs a pluggable registry of TTS and STT engines, manages the SQLite database, and handles audio processing.
-
-These two layers communicate via HTTP on `localhost:17493`, with the frontend making API requests to the backend. In production the backend is compiled with PyInstaller and launched as a Tauri sidecar; in development it's run manually via `uvicorn`.
-
-## Frontend Architecture
-
-### Tech Stack
-
-- **Framework**: React 18 with TypeScript
-- **State Management**: Zustand stores
-- **Data Fetching**: React Query (TanStack Query)
-- **Styling**: Tailwind CSS
-- **Audio**: WaveSurfer.js
-- **Desktop**: Tauri (Rust)
-
-### Component Structure
-
-<Files>
-  <Folder name="app/src" defaultOpen>
-    <Folder name="components">
-      <File name="Profiles/" />
-      <File name="Generation/" />
-      <File name="Stories/" />
-      <File name="ServerSettings/" />
-    </Folder>
-    <Folder name="lib">
-      <File name="api/" />
-      <File name="constants/" />
-      <File name="hooks/" />
-      <File name="utils/" />
-    </Folder>
-    <Folder name="stores" />
-  </Folder>
-</Files>
-
-## Backend Architecture
-
-### Tech Stack
-
-- **Framework**: FastAPI (Python 3.11+)
-- **TTS Engines**: Qwen3-TTS, Qwen CustomVoice, LuxTTS, Chatterbox, Chatterbox Turbo, TADA, Kokoro
-- **Transcription**: Whisper (PyTorch or MLX-Whisper)
-- **Inference Backends**: MLX (Apple Silicon), PyTorch (CUDA / ROCm / XPU / DirectML / CPU)
-- **Database**: SQLite via SQLAlchemy
-- **Audio**: librosa, soundfile, Pedalboard
-
-### Layout
-
-<Files>
-  <Folder name="backend" defaultOpen>
-    <File name="app.py" />
-    <File name="main.py" />
-    <File name="config.py" />
-    <File name="models.py" />
-    <File name="server.py" />
-    <File name="build_binary.py" />
-    <Folder name="routes">
-      <File name="profiles.py" />
-      <File name="generate.py" />
-      <File name="history.py" />
-      <File name="models.py" />
-      <File name="channels.py" />
-    </Folder>
-    <Folder name="services">
-      <File name="generation.py" />
-      <File name="task_queue.py" />
-      <File name="profiles.py" />
-      <File name="channels.py" />
-    </Folder>
-    <Folder name="backends">
-      <File name="__init__.py" />
-      <File name="base.py" />
-      <File name="pytorch_backend.py" />
-      <File name="mlx_backend.py" />
-      <File name="qwen_custom_voice_backend.py" />
-      <File name="luxtts_backend.py" />
-      <File name="chatterbox_backend.py" />
-      <File name="chatterbox_turbo_backend.py" />
-      <File name="hume_backend.py" />
-      <File name="kokoro_backend.py" />
-    </Folder>
-    <Folder name="database">
-      <File name="models.py" />
-      <File name="session.py" />
-    </Folder>
-    <Folder name="utils">
-      <File name="audio.py" />
-      <File name="effects.py" />
-    </Folder>
-  </Folder>
-</Files>
-
-### Request Flow
-
-An HTTP request enters a **route handler**, which validates input and delegates to a **service** function. The service calls into the appropriate **engine backend** via the registry, which runs the actual inference. Audio post-processing runs through **utils** (trim, resample, effects).
-
-Route handlers are intentionally thin — they validate input, delegate to a service function, and format the response. All business logic lives in `services/`.
-
-### Multi-Engine Registry
-
-The backend is designed so that adding a new TTS engine only requires touching the `backends/` directory and the central registry. There is no per-engine branching in routes or services.
-
-- **`TTSBackend` Protocol** (`backends/__init__.py`) — defines the contract every engine implements: `load_model`, `create_voice_prompt`, `combine_voice_prompts`, `generate`, `unload_model`, `is_loaded`, `_get_model_path`.
-- **`ModelConfig` dataclass** — central metadata record for each model variant: `model_name`, `display_name`, `engine`, `hf_repo_id`, `size_mb`, `needs_trim`, `languages`, `supports_instruct`, etc.
-- **`TTS_ENGINES` dict** — maps engine name (`"qwen"`, `"kokoro"`, etc.) to display name.
-- **`get_tts_backend_for_engine(engine)`** — thread-safe factory that lazily instantiates and caches the backend for an engine using double-checked locking.
-
-Shipped engines:
-
-| Engine key | Display name | Profile type |
-|------------|--------------|--------------|
-| `qwen` | Qwen TTS | Cloned |
-| `qwen_custom_voice` | Qwen CustomVoice | Preset |
-| `luxtts` | LuxTTS | Cloned |
-| `chatterbox` | Chatterbox TTS | Cloned |
-| `chatterbox_turbo` | Chatterbox Turbo | Cloned |
-| `tada` | TADA | Cloned |
-| `kokoro` | Kokoro | Preset |
-
-See [TTS Engines](/developer/tts-engines) for the full contract and integration phases, and [PROJECT_STATUS.md](https://github.com/jamiepine/voicebox/blob/main/docs/PROJECT_STATUS.md) for candidates under evaluation.
-
-### Key Modules
-
-- **`app.py`** — FastAPI app factory, CORS, lifecycle events
-- **`main.py`** — Entry point (imports app, runs uvicorn)
-- **`server.py`** — Tauri sidecar launcher, parent-pid watchdog, frozen-build environment setup
-- **`services/generation.py`** — Single function handling all generation modes (generate, retry, regenerate)
-- **`services/task_queue.py`** — Serial generation queue for GPU inference
-- **`backends/__init__.py`** — Protocol definitions, `ModelConfig` registry, and engine factory
-- **`backends/base.py`** — Shared utilities across all engine implementations (device selection, progress tracking, output trimming)
-
-### Inference Backend Selection
-
-The server detects the best inference backend at startup and uses it for all engines that support it:
-
-| Platform | Backend | Acceleration |
-|----------|---------|--------------|
-| macOS (Apple Silicon) | MLX | Metal / Neural Engine |
-| Windows / Linux (NVIDIA) | PyTorch | CUDA (cu128) |
-| Linux (AMD) | PyTorch | ROCm |
-| Windows / Linux (Intel Arc) | PyTorch | XPU (IPEX) |
-| Windows (other GPU) | PyTorch | DirectML |
-| Any | PyTorch | CPU fallback |
-
-See [GPU Acceleration](/overview/gpu-acceleration) for platform-specific notes and manual overrides.
-
-### Data Model
-
-Core tables (see `backend/database/models.py`):
-
-- **`profiles`** — Voice profiles with `voice_type` discriminator (`cloned` | `preset` | `designed`), `preset_engine`, `preset_voice_id`, and `default_engine`.
-- **`profile_samples`** — Reference audio clips + transcripts for cloned profiles. Empty for preset profiles.
-- **`generations`** — Generated audio with text, engine, model, language, seed, and duration.
-- **`generation_versions`** — Processed variants of a generation with different effects chains applied.
-- **`audio_channels`** + **`channel_device_mappings`** + **`profile_channel_mappings`** — Multi-output routing.
-
-See [Voice Profiles](/developer/voice-profiles) and [Effects Pipeline](/developer/effects-pipeline) for details.
-
-## Desktop App (Tauri)
-
-### Rust Backend
-
-<Files>
-  <Folder name="tauri/src-tauri" defaultOpen>
-    <File name="Cargo.toml" />
-    <File name="tauri.conf.json" />
-    <File name="src/" />
-    <Folder name="binaries" />
-  </Folder>
-</Files>
-
-### Responsibilities
-
-- Launch Python backend as sidecar process
-- Native file dialogs
-- System tray integration
-- Auto-updates (Tauri updater + custom CUDA backend swap)
-- Parent-PID watchdog so the backend exits if the app crashes
-
-## Build Process
-
-### Development
-
-```bash
-just dev              # Starts backend + Tauri app
-just dev-web          # Starts backend + web app (no Tauri)
-just dev-backend      # Backend only
-just dev-frontend     # Tauri app only (backend must be running)
+```text
+app/src/ shared UI
+  -> app/src/lib/api/ handwritten authenticated client
+  -> backend/routes/ validation and coordination
+  -> backend/services/ queue, business operations, publication
+  -> backend/backends/ model inference
+  -> backend/database/ and managed data files
 ```
 
-### Production
+## Frontend ownership
 
-```bash
-just build            # CPU server binary + Tauri installer
-just build-local      # CPU + CUDA binaries + Tauri installer (Windows)
-just build-server     # Server binary only
-just build-tauri      # Tauri app only
-```
+| Path | Role |
+| --- | --- |
+| `app/src/AppRoot.tsx`, `app/src/App.tsx` | Shared composition and screens |
+| `components/VoicesTab`, `VoiceProfiles` | Voice browser, inspector, profile/sample editing |
+| `components/Generation`, `History` | Generation form and durable history |
+| `components/StoriesTab`, `CapturesTab` | Clip composition and recordings/transcripts |
+| `components/ServerTab`, `ServerSettings` | Connection, generation/capture, model/GPU settings |
+| `lib/api/` | Client, schemas, bounded downloads, bearer authentication |
+| `lib/hooks/`, `stores/` | Queries, media lifecycle, settings and connection state |
+| `platform/` | Shared interface for platform operations |
+| `web/src/platform/`, `tauri/src/platform/` | Browser/native implementations |
 
-See [Building](/developer/building) for what PyInstaller does and how the CUDA binary is split and packaged separately.
+Shared code must not import Tauri APIs directly. A connection identity isolates
+queries, recording results, avatars, audio, and the dictation window from a server
+switch. The shared `ServerImage` handles authenticated avatars and object-URL
+cleanup. Tokens remain in memory; media fetches omit cookies.
 
-## Data Flow
+## Backend ownership
 
-### Generation Flow
+| Path under `backend/` | Role |
+| --- | --- |
+| `main.py`, `server.py` | Python module / frozen sidecar entry points |
+| `app.py` | Middleware, routers, startup/shutdown |
+| `api_security.py`, `request_limits.py` | Peer/Host/origin/bearer checks and bounded admission |
+| `config.py`, `data_permissions.py` | Data roots and private managed files |
+| `models.py` | Pydantic API models; history extends the generation response |
+| `routes/generations.py` | Request validation, exact contracts, queue admission/replay |
+| `services/generation.py`, `task_queue.py` | Generation modes, serialized execution, output publication |
+| `services/profiles.py`, `history.py` | Voice identity, metadata and history ownership |
+| `services/export_import.py`, `deletion_journal.py` | Portable archives and durable filesystem recovery |
+| `backends/__init__.py` | Engine protocols, model registry, model-size resolution |
+| `backends/mlx_tts_lifecycle.py`, `mlx_runtime.py` | MLX lifecycle and pinned implementation identity |
+| `database/` | Models, sessions and additive startup migrations |
+| `utils/` | Chunking, audio/effects, cache, progress and upload helpers |
+| `mcp_server/`, `mcp_shim/` | MCP tools and bounded stdio transport |
 
-1. **User Input** — text entered in a React component, engine + profile selected
-2. **State Update** — Zustand generation form store records the request
-3. **API Request** — React Query mutation hits `POST /generate`
-4. **Route** — `routes/generate.py` validates input, dispatches to `services/generation.py`
-5. **Voice Prompt** — the service creates or retrieves a cached voice prompt via the engine's backend
-6. **Queue** — `services/task_queue.py` serializes generation to avoid GPU contention
-7. **Inference** — the engine backend runs `generate()` and returns audio + sample rate
-8. **Post-process** — optional trim (for engines that need it), effects chain applied per generation version
-9. **Storage** — audio written to the generations directory, metadata saved to SQLite
-10. **Response** — backend returns the generation record; frontend updates React Query cache and plays audio
+Routes validate and delegate, but exact-generation coordination remains in the
+route layer. Adding an engine also requires API schemas, frontend choices, and
+packaging validation; a registry entry alone is not a complete integration.
 
-## Performance Considerations
+## Generation and storage
 
-### Frontend
+Durable requests record accepted parameters, enter a serial queue, create voice
+conditioning, invoke an engine, and publish audio/history versions. New records
+persist chunking, crossfade, and normalization for replay; old rows retain legacy
+defaults. Publication, cancellation, and deletion keep file ownership aligned
+with durable database state.
 
-- **Code splitting** — lazy-load routes
-- **Memoization** — `React.memo` for heavy components
-- **Virtual scrolling** — for large lists
-- **Debouncing** — search and input handling
+Exact callers additionally bind normalized requests, reference snapshots, and
+implementation revision. A source/runtime change can invalidate an old exact
+resume even when it changes validation rather than waveform math. Never bypass
+that check to reuse incompatible chunks.
 
-### Backend
+SQLite stores metadata/transcripts, while profiles, generations, captures, and
+snapshots are managed files. Model weights use the Hugging Face cache separately.
+See [storage](/overview/storage-and-backup) and [TTS generation](/developer/tts-generation).
 
-- **Async I/O** — all I/O is async; inference runs in `asyncio.to_thread`
-- **Serial task queue** — avoids multiple engines fighting for the GPU
-- **Voice prompt caching** — engine-specific, keyed by audio hash + reference text
-- **Model pinning** — only one model per engine loaded at a time; switching unloads the previous one
-- **Per-engine backend cache** — engines are only instantiated once per process
+## Native boundary
 
-## Security
+Rust owns the sidecar lifecycle, global capture/hotkeys, clipboard/focus targets,
+audio output, and directory opening. An occupied server port is not proof of
+ownership; reuse requires an explicit connection action. Native folder opening
+requires the current loopback Voicebox connection and rejects network/device paths
+before filesystem access. Browser clients use the web adapter's supported fallbacks.
 
-### Current
+## Other applications and records
 
-- Local-only by default (bound to `127.0.0.1:17493`)
-- No authentication (localhost trust)
-- File system sandboxing via Tauri
-
-### Planned
-
-- API key authentication for remote mode
-- User accounts
-- Rate limiting
-- HTTPS support
-
-## Deployment Modes
-
-### Local Mode
-
-- Backend runs as sidecar
-- All data stays on device
-- No network required
-
-### Remote Mode
-
-- Backend on a separate machine (Docker or bare host)
-- Frontend (desktop or web) connects over HTTP
-- See [Remote Mode](/overview/remote-mode) and [Docker](/overview/docker)
-
-## Next Steps
-
-<Cards>
-  <Card title="Development Setup" href="/developer/setup">
-    Set up your dev environment
-  </Card>
-  <Card title="TTS Engines" href="/developer/tts-engines">
-    How to add a new engine
-  </Card>
-  <Card title="Contributing" href="/developer/contributing">
-    Contribute to Voicebox
-  </Card>
-</Cards>
+`landing/` is the public site; `docs/` is a separate Fumadocs workspace. The ignored
+private `voice-profile/build/` renderer is its own local repository and talks to
+the backend over the exact API. Design proposals and old benchmarks remain in
+`docs/plans/` and `RUN_NOTES.md`; they describe their stated revisions, not the
+current startup contract.

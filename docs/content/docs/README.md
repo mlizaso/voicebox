@@ -1,38 +1,18 @@
 ---
-title: "Documentation README"
-description: "Voicebox documentation development guide"
+title: "Documentation source guide"
+description: "Where Voicebox documentation lives and how to maintain it"
 ---
 
-This directory contains the documentation for Voicebox, built with [Fumadocs](https://fumadocs.dev).
+This is the Fumadocs content tree. The repository's `README.md` is the complete
+operating guide; `docs/README.md` describes installation, builds, API generation,
+navigation, and documentation maintenance.
 
-## Development
+- `overview/`: end-user workflows and storage.
+- `developer/`: architecture, development, and service internals.
+- `api-reference/`: generated from `docs/openapi.json`; regenerate rather than
+  hand-editing the operation wrappers.
+- `index.mdx`: site home page; `meta.json` files control navigation.
 
-### Running Locally
-
-From the `docs/` directory:
-
-```bash
-bun install
-bun run dev
-```
-
-The docs will be available at `http://localhost:3000`.
-
-### Structure
-
-- `content/docs/overview/` — user-facing guides (installation, quick start, feature walkthroughs)
-- `content/docs/developer/` — architecture, backend internals, and contributor guides
-- `content/docs/api-reference/` — auto-generated from the backend's OpenAPI schema
-- `content/docs/index.mdx` — landing page
-- `public/` — static assets (images, screenshots, videos)
-
-### Writing Docs
-
-- Use `.mdx` files for all documentation pages
-- Navigation is generated from `content/docs/meta.json` files
-- Fumadocs components available: `Callout`, `Cards` / `Card`, `Tabs` / `Tab`, `Steps` / `Step`, `Accordion` / `AccordionGroup`, `Files` / `Folder` / `File`
-- API reference pages under `api-reference/` are regenerated from the backend's OpenAPI schema — don't edit them by hand
-
-## Deployment
-
-Docs are automatically deployed when changes land on `main`.
+From `docs/`, run `bun install --frozen-lockfile`, then `bun run dev`.
+Validate with `bun run test` and `bun run build` (or `bun run build --webpack`
+when Turbopack cannot start in the environment).

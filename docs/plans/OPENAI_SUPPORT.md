@@ -1,5 +1,8 @@
 # OpenAI API Compatibility
 
+> **Historical design record — current status checked 2026-09-05.**
+> The current backend exposes Voicebox REST and MCP routes, not the proposed `/v1/audio/*` compatibility endpoints below. Use the running backend `/docs` or the [backend guide](../../backend/README.md).
+
 **Status:** Planned for v0.2.0
 
 **Issue:** [#10 OpenAI API compatibility](https://github.com/jamiepine/voicebox/issues/10)
@@ -127,7 +130,7 @@ async def create_transcription(
 
 ### Voice Profile Resolution
 
-Add helper in [backend/profiles.py](backend/profiles.py):
+Add helper in [backend/services/profiles.py](../../backend/services/profiles.py):
 
 ```python
 async def resolve_voice_for_openai(voice: str, db: Session) -> Optional[VoiceProfile]:
@@ -145,7 +148,7 @@ async def resolve_voice_for_openai(voice: str, db: Session) -> Optional[VoicePro
 
 ### Audio Format Conversion
 
-Add conversion utilities in [backend/utils/audio.py](backend/utils/audio.py):
+Add conversion utilities in [backend/utils/audio.py](../../backend/utils/audio.py):
 
 ```python
 def convert_audio_format(
@@ -159,7 +162,7 @@ def convert_audio_format(
 
 ### Configuration
 
-Add to [backend/config.py](backend/config.py):
+Add to [backend/config.py](../../backend/config.py):
 
 ```python
 # OpenAI API Compatibility
@@ -171,7 +174,7 @@ OPENAI_COMPAT_API_KEY = None        # If set, validate against this
 
 ### Integration with main.py
 
-In [backend/main.py](backend/main.py), include the router:
+In [backend/main.py](../../backend/main.py), include the router:
 
 ```python
 from . import openai_compat

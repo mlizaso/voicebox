@@ -7,6 +7,44 @@
 
 ## [Unreleased]
 
+This fork strengthens long-form generation and the boundaries around it. Saved
+requests retain their delivery settings, exact callers bind frozen voice/runtime
+identity, and audio/database recovery protects completed work across failures.
+The shared UI and backend have clearer module ownership and fewer legacy copies.
+
+### Generation and audio
+
+- Preserve chunk size, crossfade, normalization, model, and provenance across
+  supported retry/regenerate and archive workflows; keep legacy defaults for old rows.
+- Validate engine/model combinations before inference. Imported audio cannot be
+  reinterpreted as a TTS request. Archive round trips preserve audio bytes.
+- Guard MLX model lifetime, cloned reference identity, speaker-embedding dtype,
+  runaway chunks, and exact implementation revisions. Skip unnecessary Qwen
+  reference-prefix vocoding without changing the generated continuation contract.
+- Use durable publication, chunk checkpoints, and bounded story mixing/export.
+  The optional private audiobook tools remain a separate local workspace.
+
+### Security and reliability
+
+- Enforce trusted hosts/origins, remote HTTPS/bearer authentication, bounded
+  upload/MCP/media parsing, and private managed storage.
+- Harden archives, deletion recovery, cloud callback state, desktop command
+  origins, capture/output ownership, clipboard/focus targets, and sidecar reuse.
+- Isolate cached data, recordings, images, audio, and dictation state across
+  server changes; keep remote tokens in memory.
+- Refuse model migration conflicts instead of deleting destination models.
+  Coalesce release-stat refreshes and retain complete cached results on failures.
+
+### Interface and maintenance
+
+- Consolidate the shared platform boundary and handwritten API client; remove
+  unused legacy screens/client generation and share authenticated avatar handling.
+- Add Spanish, French, Italian, Korean, and Brazilian Portuguese translations
+  from the upstream changes included after 0.5.0.
+- Include browser/device cloud login with validated callback/disconnect behavior.
+- Replace stale setup/storage examples with a complete README operating guide,
+  current audiobook instructions, and regenerated API documentation.
+
 ### Linux
 
 - **ROCm setup works on Linux AMD systems.** Docker ROCm builds now keep PyTorch

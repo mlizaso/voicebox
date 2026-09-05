@@ -3,6 +3,15 @@ title: "TTS Engines"
 description: "How to add new text-to-speech engines to Voicebox"
 ---
 
+## Current implementation notes
+
+The registry is one part of an integration. Confirm request schemas, engine/model
+validation, profile compatibility, frontend choices, and packaging as well. Preserve
+MLX lifecycle and exact-runtime identity checks. The current module map is in
+[architecture](/developer/architecture); do not treat an old example below as proof
+that routes/services need no review.
+
+
 > **For humans:** This doc is optimized for AI agents to implement new TTS engines autonomously. It's structured as a phased workflow with explicit gates and a checklist so an agent can do the full integration — dependency research, backend, frontend, bundling — and hand you a draft release or prod build to test locally. It's also a useful reference if you're doing it yourself.
 
 Adding an engine touches ~10 files across 4 layers. The backend protocol work is straightforward — the real time sink is dependency hell, upstream library bugs, and PyInstaller bundling.
@@ -15,12 +24,12 @@ The backend is split into layers:
 
 | Layer | Purpose | Files Touched |
 |-------|---------|---------------|
-| `routes/` | Thin HTTP handlers | None (auto-dispatch) |
-| `services/` | Business logic | None (auto-dispatch) |
+| `routes/` | HTTP validation and dispatch | Review accepted engines, streaming, and exact routes |
+| `services/` | Generation and profile operations | Review compatibility, queueing, and reference handling |
 | `backends/` | Engine implementations | `your_engine_backend.py` |
 | `utils/` | Shared utilities | As needed |
 
-New engines only need to touch `backends/` and `models.py` on the backend side — the route and service layers use a model config registry that handles dispatch automatically.
+The model registry centralizes dispatch, but it does not replace request validation, profile compatibility, lifecycle management, or packaging. Review those paths when adding an engine; change them only where the integration requires it.
 
 ## Phase 0: Dependency Research
 

@@ -1,185 +1,80 @@
 ---
 title: "Remote Mode"
-description: "Connect to a GPU server for faster generation"
+description: "Connect securely to a backend and keep server data separate"
 ---
 
-## Overview
+## What runs where
 
-Remote Mode allows you to run the Voicebox backend on a separate machine (like a GPU server) while using the desktop app on your local machine.
+The client displays the studio; the remote backend stores profiles/captures/history,
+loads models, and generates audio. Model/GPU capacity and all server-side paths
+belong to that machine. This API is not a multi-tenant account-isolation system:
+clients sharing its token access the same server data.
 
-## Use Cases
+Remote hardware may improve throughput, but compare the same model, references,
+sampling, and processing before treating it as a quality-preserving migration.
 
-- **No local GPU** - Use a cloud GPU or remote workstation
-- **Faster generation** - Leverage powerful remote hardware
-- **Shared infrastructure** - Multiple users connect to one server
-- **Laptop workflows** - Keep your laptop cool and battery-efficient
+## Server setup
 
-## Architecture
-
-In Remote Mode, the Voicebox desktop app (running on your local machine) communicates with the backend server (running on a remote machine) over HTTPS or a loopback tunnel. The local app provides only the user interface, while the remote server handles all the heavy processing including the TTS models, API endpoints, and audio generation.
-
-## Setting Up Remote Mode
-
-### On the Server
-
-<Steps>
-  <Step title="Install Dependencies">
-    ```bash
-    # Clone the repo
-    git clone https://github.com/jamiepine/voicebox.git
-    cd voicebox/backend
-
-    # Install Python dependencies
-    pip install -r requirements.txt
-
-    # Engines with incompatible transitive pins — install with --no-deps
-    pip install --no-deps chatterbox-tts
-    pip install --no-deps hume-tada
-
-    # Qwen3-TTS from source
-    pip install git+https://github.com/QwenLM/Qwen3-TTS.git
-    ```
-
-    Or just run `just setup` from the repo root, which handles all of this.
-  </Step>
-
-  <Step title="Start the Server Behind TLS">
-    ```bash
-    # Generate this once and store it in your secret manager.
-    export VOICEBOX_REMOTE_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-
-    # Keep the public request authority explicit.
-    export VOICEBOX_TRUSTED_HOSTS="voicebox.example"
-
-    # Bind Voicebox to loopback, then publish it through your TLS reverse proxy.
-    uvicorn backend.main:app --host 127.0.0.1 --port 17493
-    ```
-
-    <Callout type="warn">
-      A bearer token authenticates a client but does not encrypt traffic.
-      Voicebox rejects remote API authentication over plain HTTP by default.
-      Configure the proxy to pass the public Host and HTTPS scheme, and trust
-      proxy headers only from the proxy itself.
-    </Callout>
-  </Step>
-
-  <Step title="Open Only the TLS Listener">
-    ```bash
-    # Example for an HTTPS reverse proxy on Ubuntu/Debian
-    sudo ufw allow 443/tcp
-
-    # Or use your cloud provider's firewall settings
-    ```
-
-    Keep Voicebox's loopback port `17493` closed to the network. The reverse
-    proxy is the only public listener.
-  </Step>
-</Steps>
-
-### On the Client
-
-<Steps>
-  <Step title="Open Settings">
-    In Voicebox, go to **Settings → Server**
-  </Step>
-
-  <Step title="Enable Remote Mode">
-    Toggle **Use Remote Server**
-  </Step>
-
-  <Step title="Enter Server URL">
-    ```
-    https://voicebox.example
-    ```
-
-    Replace the example with the HTTPS authority configured in
-    `VOICEBOX_TRUSTED_HOSTS`.
-  </Step>
-
-  <Step title="Enter the API Token">
-    Paste the same `VOICEBOX_REMOTE_API_TOKEN` value into **Settings → Server →
-    Remote API token**. Voicebox sends it only to the configured server origin.
-  </Step>
-
-  <Step title="Test Connection">
-    Click **Test Connection** to verify
-  </Step>
-</Steps>
-
-## Cloud Deployment
-
-### AWS EC2
+Set up this checkout with `just setup-python`. Keep the API on loopback behind an
+HTTPS reverse proxy. Generate a persistent token once and retain it securely:
 
 ```bash
-# Launch a GPU instance (e.g., g4dn.xlarge)
-# Install dependencies
-# Bind Voicebox to loopback and publish it through an HTTPS reverse proxy
+export VOICEBOX_REMOTE_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export VOICEBOX_TRUSTED_HOSTS="voicebox.example"
+backend/venv/bin/python -m backend.main \
+  --host 127.0.0.1 --port 17493 --data-dir /absolute/path/to/voicebox-data
 ```
 
-### Vast.ai
+Publish the proxy's TLS listener, not the backend port. Preserve the public Host
+and HTTPS request scheme; trust forwarded headers only from the proxy. If a web
+UI uses another origin, add its complete origin to `VOICEBOX_CORS_ORIGINS`.
+Both settings require explicit values; wildcard hosts/origins are refused.
 
 ```bash
-# Rent a GPU instance
-# SSH in and clone repo
-# Start server
+curl --fail -H "Authorization: Bearer $VOICEBOX_REMOTE_API_TOKEN" \
+  https://voicebox.example/health
 ```
 
-### RunPod
+The token is 32–512 URL-safe ASCII characters. A token authenticates requests;
+HTTPS protects it in transit. Do not put it in URLs, logs, screenshots, or commits.
 
-```bash
-# Deploy a pod with CUDA support
-# Install Voicebox backend
-# Expose port 17493
-```
+## Client setup
 
-## Security Considerations
+Open **Settings → Server**, choose the remote server connection, enter the HTTPS
+URL and **Remote API token**, and test/connect. The app sends bearer headers to
+that server origin for API calls, avatars, audio, and event streams. It omits
+cookies and keeps credentials in memory; a restart may require entering them again.
 
-<Callout type="warn">
-  Never treat a bearer token sent over plain HTTP as secure. Anyone able to
-  observe the connection can replay it. Keep the token out of URLs and logs.
-</Callout>
+Switching connections clears the previous server's cache and cancels/discards
+stale media or recording results. The native dictation window mirrors the active
+connection in memory. Local folder-opening controls are disabled for remote servers.
 
-**Best Practices:**
-- Prefer HTTPS, or an SSH loopback tunnel when only one client needs access
-- Keep the built-in bearer token enabled even behind a reverse proxy
-- Run behind an additional reverse-proxy authentication layer when appropriate
-- Firewall rules to limit access to specific IPs
+## Loopback SSH tunnel
 
-### Loopback tunnel alternative
-
-Keep Voicebox bound to `127.0.0.1` on the server and forward it with SSH:
+For a private connection, keep the backend bound to loopback and forward it:
 
 ```bash
 ssh -N -L 17493:127.0.0.1:17493 user@voicebox.example
 ```
 
-The client can then use `http://127.0.0.1:17493`; the bearer never crosses a
-plaintext network hop.
+Connect to `http://127.0.0.1:17493`. The actual network hop is protected by SSH.
+The backend sees a direct local request; this grants the local API's privileges,
+including MCP server-local path access. Use it only for a server you control.
+Paths still belong to the remote filesystem, even though the URL is loopback;
+do not use local folder buttons to interpret them.
 
-### Explicit insecure compatibility mode
+## Compatibility and limits
 
-Direct `--host 0.0.0.0` is plain HTTP. It remains available for specialized
-deployments only after the operator explicitly sets
-`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1`. This override permits replayable
-credentials and is not a substitute for TLS. The Voicebox browser/desktop
-client still refuses non-loopback `http://` server URLs, so use it only with a
-separately secured transport and a client whose risk you have evaluated.
+Requests can omit authentication only if both their peer and Host are local.
+An HTTPS reverse proxy with a public Host still requires a bearer token. Server-local
+MCP transcription paths are denied to remote calls even when authenticated;
+upload base64 audio instead.
 
-## Performance
+Non-loopback plain HTTP is rejected by the app. The server's explicit
+`VOICEBOX_ALLOW_INSECURE_REMOTE_HTTP=1` compatibility option permits unencrypted
+transport and is not a public deployment recipe. The supplied Compose file uses
+it only for its private bridge behind a host-loopback listener; see [Docker](/overview/docker).
 
-Expected performance on various GPUs:
-
-| GPU | Generation Speed |
-|-----|------------------|
-| RTX 4090 | ~2-3s per 10 words |
-| RTX 3090 | ~3-4s per 10 words |
-| RTX 3060 | ~5-7s per 10 words |
-| CPU (12-core) | ~20-30s per 10 words |
-
-<Callout type="info">
-  A GPU with 8GB+ VRAM is recommended for best performance.
-</Callout>
-
-## Troubleshooting
-
-See the [Troubleshooting Guide](/overview/troubleshooting) for common issues.
+For missing profiles, inspect the connected server's `/health/filesystem` rather
+than the client machine's app directory. See [storage](/overview/storage-and-backup)
+and [troubleshooting](/overview/troubleshooting).

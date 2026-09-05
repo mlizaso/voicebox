@@ -1,100 +1,57 @@
-# Voicebox Landing Page
+# Voicebox landing site
 
-Landing page for voicebox.sh - a modern Next.js 16 application.
+This Next.js site is the public presentation, downloads, blog, and cloud/pricing
+surface. It is separate from the voice studio in `app/`, `web/`, and `tauri/`.
+For running Voicebox or finding profiles/audio, use the [main README](../README.md).
 
-## Tech Stack
+## Run and validate
 
-- **Next.js 16** with App Router
-- **Bun** for package management
-- **Tailwind CSS** with shadcn/ui components
-- **TypeScript** with strict mode
-- **Railway** deployment ready
-
-## Getting Started
-
-### Prerequisites
-
-- Bun installed ([bun.sh](https://bun.sh))
-
-### Installation
+Install the shared Bun workspace from the repository root:
 
 ```bash
-cd landing
-bun install
+bun install --frozen-lockfile
+bun run dev:landing
 ```
 
-### Development
+Next.js normally prints `http://localhost:3000`. The documentation site uses the
+same default port, so select another port or run them separately.
 
 ```bash
-bun run dev
+bun run --cwd landing test
+bun run build:landing
+bun run --cwd landing start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to view the landing page.
+For an environment that cannot start Turbopack workers, run
+`bun run --cwd landing build --webpack`. `start` requires a completed build.
 
-### Build
+## Structure and configuration
 
-```bash
-bun run build
-```
+| Path | Responsibility |
+| --- | --- |
+| `src/app/` | App Router pages, download redirects, cloud/pricing/token surfaces |
+| `src/components/` | Landing UI components |
+| `src/lib/constants.ts` | Repository/site constants |
+| `src/lib/releases.ts` | GitHub release links, star/download totals, five-minute cache |
+| `src/lib/blog.ts`, `src/posts/` | Markdown blog loading and posts |
+| `src/lib/token-stats.ts` | Token-stat integrations |
+| `public/` | Public images, video, and static assets |
+| `tests/` | Redirect and release-cache regressions |
+| `nixpacks.toml` | Deployment build/start configuration |
 
-### Production
+Download URLs come from release assets and the configured repository; there are
+no `LATEST_VERSION` or `DOWNLOAD_LINKS` constants to update manually. The
+configured upstream download channel does not automatically distribute changes
+from this fork.
 
-```bash
-bun run start
-```
+Release/star refreshes share an in-flight request and use a bounded timeout.
+Download totals are cached only after all pages succeed; a failed refresh can
+serve the previous complete result. Download redirects use the canonical site
+origin instead of request forwarding headers.
 
-## Configuration
+## Content and deployment
 
-### Update Download Links
-
-Edit `src/lib/constants.ts` to update:
-- `LATEST_VERSION` - Current release version
-- `DOWNLOAD_LINKS` - GitHub release download URLs
-- `GITHUB_REPO` - Repository URL
-
-### Update GitHub Username
-
-Replace `USERNAME` in `src/lib/constants.ts` with your actual GitHub username.
-
-## Deployment to Railway
-
-1. Connect your GitHub repository to Railway
-2. Railway will auto-detect `nixpacks.toml`
-3. Set root directory to `landing/`
-4. Railway will automatically:
-   - Install dependencies with `bun install`
-   - Build with `bun run build`
-   - Start with `bun run start`
-5. Configure custom domain `voicebox.sh` in Railway settings
-
-## Project Structure
-
-```
-landing/
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx      # Root layout with metadata
-│   │   ├── page.tsx        # Landing page
-│   │   └── globals.css     # Global styles
-│   ├── components/
-│   │   ├── Header.tsx      # Top navigation
-│   │   ├── Footer.tsx      # Footer
-│   │   ├── DownloadSection.tsx  # Download buttons
-│   │   └── ui/             # shadcn/ui components
-│   └── lib/
-│       ├── utils.ts        # Utility functions
-│       └── constants.ts    # App constants
-├── public/
-│   └── voicebox-logo.png   # Logo asset
-└── nixpacks.toml          # Railway deployment config
-```
-
-## Features
-
-- Responsive design (mobile-first)
-- Dark mode by default
-- SEO optimized metadata
-- Download links for Mac, Windows, Linux
-- Feature showcase
-- Platform highlights
-- GitHub integration
+Write posts under `src/posts/` using the metadata expected by `src/lib/blog.ts`.
+Keep dated posts as historical articles; operational instructions belong in the
+project docs. Inspect the repository's deployment settings and `nixpacks.toml`
+before publishing. A successful local build is not a deployment.

@@ -1,5 +1,8 @@
 # Docker Deployment Guide
 
+> **Historical design record — current status checked 2026-09-05.**
+> Docker is implemented. Current token, host-port (17600), volume, and TLS instructions are in [the Docker guide](../content/docs/overview/docker.mdx); the old image commands below are proposals.
+
 **Status:** In Development for v0.2.0
 **Requested By:** Reddit community ([thread](https://reddit.com/r/LocalLLaMA/...))
 
