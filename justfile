@@ -358,15 +358,6 @@ db-reset:
 
 # ─── Utilities ────────────────────────────────────────────────────────
 
-# Generate TypeScript API client (backend must be running)
-[unix]
-generate-api:
-    ./scripts/generate-api.sh
-
-[windows]
-generate-api:
-    bash scripts/generate-api.sh
-
 # Open API docs in browser
 [unix]
 docs:

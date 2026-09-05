@@ -27,18 +27,23 @@ export interface PlatformFilesystem {
   pickDirectory(title: string): Promise<string | null>;
 }
 
-export interface FocusSnapshot {
-  pid: number;
-  bundle_id: string | null;
-  role: string | null;
+/** One-use native target captured when the dictation hotkey was pressed. */
+export type FocusTarget = number;
+
+/** Memory-only identity shared with the separate desktop dictation webview. */
+export interface ServerConnection {
+  connectionId: string;
+  serverUrl: string;
+  remoteApiToken: string;
+  mode: 'local' | 'remote';
 }
 
 /** Every cross-window event supported by the shared application layer. */
 export interface PlatformEventMap {
-  'capture:created': { capture: CaptureResponse };
-  'capture:updated': { id: string };
+  'capture:created': { capture: CaptureResponse; connectionId: string };
+  'capture:updated': { id: string; connectionId: string };
   'system:accessibility-missing': undefined;
-  'dictate:start': { focus: FocusSnapshot | null };
+  'dictate:start': { focus: FocusTarget | null };
   'dictate:stop': undefined;
   'dictate:restart': undefined;
   'dictate:speak-start': string;
@@ -72,7 +77,7 @@ export interface PlatformDictation {
   openAccessibilitySettings(): Promise<void>;
   checkInputMonitoringPermission(): Promise<boolean>;
   openInputMonitoringSettings(): Promise<void>;
-  pasteFinalText(text: string, focus: FocusSnapshot): Promise<boolean>;
+  pasteFinalText(text: string, focus: FocusTarget): Promise<boolean>;
 }
 
 export interface UpdateStatus {
@@ -108,7 +113,7 @@ export interface PlatformAudio {
   stopSystemAudioCapture(): Promise<Blob>;
   listOutputDevices(): Promise<AudioDevice[]>;
   playToDevices(audioData: Uint8Array, deviceIds: string[]): Promise<void>;
-  stopPlayback(): void;
+  stopPlayback(): Promise<void>;
 }
 
 export interface ServerLogEntry {
@@ -122,10 +127,13 @@ export interface ServerCloseState {
 }
 
 export interface PlatformLifecycle {
+  setClientConnection(connection: ServerConnection): Promise<void>;
+  getClientConnection(): Promise<ServerConnection | null>;
   startServer(
     remote?: boolean,
     modelsDir?: string | null,
     remoteApiToken?: string | null,
+    allowExternal?: boolean,
   ): Promise<string>;
   stopServer(): Promise<void>;
   restartServer(modelsDir?: string | null): Promise<string>;
@@ -134,6 +142,7 @@ export interface PlatformLifecycle {
   subscribeToWindowClose(getState: () => ServerCloseState): () => void;
   subscribeToServerLogs(callback: (entry: ServerLogEntry) => void): () => void;
   onServerReady?: () => void;
+  onServerStopped?: () => void;
 }
 
 export interface PlatformMetadata {

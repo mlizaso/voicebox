@@ -1,6 +1,7 @@
+import { EventSource as FetchEventSource } from 'eventsource';
 import { useServerStore } from '@/stores/serverStore';
 
-function isLoopbackHostname(hostname: string): boolean {
+export function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/\.$/, '');
   if (
     normalized === 'localhost' ||
@@ -30,6 +31,18 @@ export function isSecureVoiceboxServerUrl(value: string): boolean {
   }
 }
 
+/** Remote sessions require the explicitly configured capability, even if a
+ * browser retained an HttpOnly cookie from an earlier login. */
+export function validateVoiceboxConnection(): void {
+  const state = useServerStore.getState();
+  if (!isSecureVoiceboxServerUrl(state.serverUrl)) {
+    throw new TypeError('Refusing to send a Voicebox request to a non-loopback server over HTTP');
+  }
+  if (!isLoopbackHostname(new URL(state.serverUrl).hostname) && !state.remoteApiToken) {
+    throw new TypeError('Enter the remote API token to connect to this server');
+  }
+}
+
 function isVoiceboxRequest(input: RequestInfo | URL): boolean {
   try {
     const requestUrl = new URL(
@@ -53,33 +66,47 @@ export function authenticatedFetch(
   );
   const state = useServerStore.getState();
   const voiceboxRequest = isVoiceboxRequest(input);
-  if (voiceboxRequest && !isSecureVoiceboxServerUrl(state.serverUrl)) {
-    return Promise.reject(
-      new TypeError('Refusing to send a Voicebox request to a non-loopback server over HTTP'),
-    );
+  if (voiceboxRequest) {
+    try {
+      validateVoiceboxConnection();
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
   if (state.remoteApiToken && voiceboxRequest && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${state.remoteApiToken}`);
   }
   return fetch(input, {
     ...init,
-    credentials:
-      init.credentials ??
-      (voiceboxRequest
-        ? 'include'
-        : ((input instanceof Request ? input.credentials : undefined) ?? 'same-origin')),
+    // Every remote request uses the configured bearer, including event streams.
+    // Never silently reuse a previous account's HttpOnly session cookie.
+    credentials: voiceboxRequest
+      ? 'omit'
+      : (init.credentials ?? (input instanceof Request ? input.credentials : 'same-origin')),
     headers,
   });
 }
 
-/** Open a Voicebox event stream with its HttpOnly remote session cookie. */
-export function authenticatedEventSource(input: string | URL): EventSource {
+/** Keep the standard EventSource API while authenticating every reconnect. */
+export function authenticatedEventSource(input: string | URL) {
   const state = useServerStore.getState();
-  const voiceboxRequest = isVoiceboxRequest(input);
-  if (voiceboxRequest && !isSecureVoiceboxServerUrl(state.serverUrl)) {
-    throw new TypeError(
-      'Refusing to open a Voicebox event stream to a non-loopback server over HTTP',
-    );
-  }
-  return new EventSource(input, { withCredentials: voiceboxRequest });
+  const source = new FetchEventSource(input, {
+    fetch: authenticatedFetch,
+    maxBufferSize: 1024 * 1024,
+  });
+  const unsubscribe = useServerStore.subscribe((current) => {
+    if (
+      current.serverUrl !== state.serverUrl ||
+      current.remoteApiToken !== state.remoteApiToken ||
+      current.mode !== state.mode
+    ) {
+      source.close();
+    }
+  });
+  const close = source.close.bind(source);
+  source.close = () => {
+    unsubscribe();
+    close();
+  };
+  return source;
 }

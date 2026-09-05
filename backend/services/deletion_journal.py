@@ -106,6 +106,8 @@ def _file_flags() -> int:
 
 
 def _validate_relative_path(value: str | Path) -> Path:
+    if not isinstance(value, (str, Path)):
+        raise ValueError("Deletion journal paths must be strings")
     path = Path(value)
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError("Deletion journal paths must be safe relative paths")

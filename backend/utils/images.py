@@ -2,10 +2,8 @@
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
-# JPEG can be reported as 'JPEG' or 'MPO' (for multi-picture format from some cameras)
-ALLOWED_FORMATS = {"PNG", "JPEG", "WEBP", "MPO", "JPG"}
 MAX_SIZE = 512
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_IMAGE_PIXELS = 16_777_216  # 4096 x 4096; ample for a 512px avatar
@@ -59,25 +57,7 @@ def process_avatar(input_path: str, output_path: str, max_size: int = MAX_SIZE) 
         max_size: Maximum width or height in pixels
     """
     with Image.open(input_path) as img:
-        # Handle EXIF orientation for JPEG images
-        try:
-            from PIL import ExifTags
-
-            for orientation in ExifTags.TAGS:
-                if ExifTags.TAGS[orientation] == "Orientation":
-                    break
-            exif = img._getexif()
-            if exif is not None:
-                orientation_value = exif.get(orientation)
-                if orientation_value == 3:
-                    img = img.rotate(180, expand=True)
-                elif orientation_value == 6:
-                    img = img.rotate(270, expand=True)
-                elif orientation_value == 8:
-                    img = img.rotate(90, expand=True)
-        except (AttributeError, KeyError, IndexError, TypeError):
-            # No EXIF data or orientation tag
-            pass
+        ImageOps.exif_transpose(img, in_place=True)
 
         # Convert to RGB if necessary (handles RGBA, P, CMYK, etc.)
         if img.mode not in ("RGB", "L"):
@@ -86,12 +66,6 @@ def process_avatar(input_path: str, output_path: str, max_size: int = MAX_SIZE) 
                 background = Image.new("RGB", img.size, (255, 255, 255))
                 background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
                 img = background
-            elif img.mode == "CMYK":
-                # Convert CMYK to RGB
-                img = img.convert("RGB")
-            elif img.mode == "P":
-                # Convert palette mode to RGB
-                img = img.convert("RGB")
             else:
                 img = img.convert("RGB")
 

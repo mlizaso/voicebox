@@ -86,10 +86,8 @@ def build_server(cuda=False, rocm=False):
         binary_name,
     ]
 
-    # Hide console window on Windows only. On macOS/Linux the sidecar needs
-    # stdout/stderr for Tauri to capture logs.
-    if platform.system() == "Windows":
-        args.append("--noconsole")
+    # Keep piped stdout/stderr for sidecar readiness and diagnostics. Tauri's
+    # shell launcher already suppresses the Windows console window.
 
     # numpy 2.x / torch ABI mismatch fix: install memmove fallback for
     # torch.from_numpy() before the app starts. Runtime hooks run after

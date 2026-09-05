@@ -5,21 +5,37 @@ import type {
   ActiveTasksResponse,
   ApplyEffectsRequest,
   AvailableEffectsResponse,
+  CaptureCreateResponse,
+  CaptureListResponse,
+  CaptureReadinessResponse,
+  CaptureRefineRequest,
+  CaptureResponse,
+  CaptureRetranscribeRequest,
+  CaptureSettings,
+  CaptureSettingsUpdate,
+  CaptureSource,
+  CloudLoginStartResponse,
+  CloudStatus,
   CudaStatus,
   EffectConfig,
   EffectPresetCreate,
   EffectPresetResponse,
   GenerationRequest,
   GenerationResponse,
+  GenerationSettings,
+  GenerationSettingsUpdate,
   GenerationVersionResponse,
   HealthResponse,
   HistoryListResponse,
   HistoryQuery,
   HistoryResponse,
+  MCPClientBinding,
+  MCPClientBindingListResponse,
+  MCPClientBindingUpsert,
   ModelDownloadRequest,
   ModelStatusListResponse,
-  PresetVoice,
   PersonalityTextResponse,
+  PresetVoice,
   ProfileSampleResponse,
   RocmStatus,
   StoryCreate,
@@ -38,22 +54,6 @@ import type {
   VoiceProfileCreate,
   VoiceProfileResponse,
   WhisperModelSize,
-  CaptureListResponse,
-  CaptureResponse,
-  CaptureCreateResponse,
-  CaptureReadinessResponse,
-  CaptureRefineRequest,
-  CaptureRetranscribeRequest,
-  CaptureSettings,
-  CaptureSettingsUpdate,
-  CaptureSource,
-  GenerationSettings,
-  GenerationSettingsUpdate,
-  MCPClientBinding,
-  MCPClientBindingListResponse,
-  MCPClientBindingUpsert,
-  CloudLoginStartResponse,
-  CloudStatus,
 } from './types';
 
 function formatErrorDetail(detail: unknown, fallback: string): string {
@@ -191,7 +191,7 @@ class ApiClient {
     });
   }
 
-  async exportProfile(profileId: string): Promise<Blob> {
+  async exportProfile(profileId: string): Promise<Response> {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/export`;
     const response = await authenticatedFetch(url);
 
@@ -202,7 +202,7 @@ class ApiClient {
       throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
     }
 
-    return response.blob();
+    return response;
   }
 
   async importProfile(file: File): Promise<VoiceProfileResponse> {
@@ -327,7 +327,7 @@ class ApiClient {
     });
   }
 
-  async exportGeneration(generationId: string): Promise<Blob> {
+  async exportGeneration(generationId: string): Promise<Response> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export`;
     const response = await authenticatedFetch(url);
 
@@ -338,10 +338,10 @@ class ApiClient {
       throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
     }
 
-    return response.blob();
+    return response;
   }
 
-  async exportGenerationAudio(generationId: string): Promise<Blob> {
+  async exportGenerationAudio(generationId: string): Promise<Response> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export-audio`;
     const response = await authenticatedFetch(url);
 
@@ -352,7 +352,7 @@ class ApiClient {
       throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
     }
 
-    return response.blob();
+    return response;
   }
 
   async importGeneration(file: File): Promise<{

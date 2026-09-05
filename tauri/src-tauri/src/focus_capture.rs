@@ -36,6 +36,64 @@ pub struct FocusSnapshot {
     pub role: Option<String>,
 }
 
+/// One-use targets captured by native hotkeys. IPC callers receive only an ID.
+#[derive(Default)]
+pub struct PendingFocusTargets(
+    std::sync::Mutex<(
+        u64,
+        std::collections::VecDeque<(u64, std::time::Instant, FocusSnapshot)>,
+    )>,
+);
+
+impl PendingFocusTargets {
+    pub fn register(&self, focus: FocusSnapshot) -> u64 {
+        let mut state = self.0.lock().unwrap();
+        state.0 += 1;
+        let id = state.0;
+        if state.1.len() >= 32 {
+            state.1.pop_front();
+        }
+        state.1.push_back((id, std::time::Instant::now(), focus));
+        id
+    }
+
+    pub fn take(&self, id: u64) -> Result<FocusSnapshot, String> {
+        let mut state = self.0.lock().unwrap();
+        state
+            .1
+            .retain(|(_, time, _)| time.elapsed().as_secs() < 3600);
+        let index = state
+            .1
+            .iter()
+            .position(|(target, _, _)| *target == id)
+            .ok_or_else(|| "Dictation target is unknown, expired or already used".to_string())?;
+        Ok(state.1.remove(index).unwrap().2)
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn targets_are_native_one_use_and_independent_of_completion_order() {
+        let targets = PendingFocusTargets::default();
+        let first = targets.register(FocusSnapshot {
+            pid: 101,
+            bundle_id: Some("first".into()),
+            role: None,
+        });
+        let second = targets.register(FocusSnapshot {
+            pid: 202,
+            bundle_id: Some("second".into()),
+            role: None,
+        });
+        assert!(targets.take(999).is_err());
+        assert_eq!(targets.take(second).unwrap().pid, 202);
+        assert_eq!(targets.take(first).unwrap().pid, 101);
+        assert!(targets.take(first).is_err());
+    }
+}
+
 #[cfg(target_os = "macos")]
 use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease};
 #[cfg(target_os = "macos")]
@@ -121,7 +179,8 @@ unsafe fn ns_string_to_rust(s: Id) -> Option<String> {
 #[cfg(target_os = "macos")]
 unsafe fn cf_string_const(s: &str) -> Option<CFStringRef> {
     let cstr = std::ffi::CString::new(s).ok()?;
-    let result = CFStringCreateWithCString(kCFAllocatorDefault, cstr.as_ptr(), kCFStringEncodingUTF8);
+    let result =
+        CFStringCreateWithCString(kCFAllocatorDefault, cstr.as_ptr(), kCFStringEncodingUTF8);
     if result.is_null() {
         None
     } else {
@@ -182,9 +241,8 @@ pub fn capture_focus() -> Result<FocusSnapshot, String> {
         if system_wide.is_null() {
             return Err("AXUIElementCreateSystemWide returned null".into());
         }
-        let _sys_guard = scopeguard::guard(system_wide, |e| {
-            CFRelease(e as *const std::ffi::c_void)
-        });
+        let _sys_guard =
+            scopeguard::guard(system_wide, |e| CFRelease(e as *const std::ffi::c_void));
 
         let focused_attr = cf_string_const("AXFocusedUIElement")
             .ok_or("Failed to build AXFocusedUIElement CFString")?;
@@ -192,11 +250,7 @@ pub fn capture_focus() -> Result<FocusSnapshot, String> {
             scopeguard::guard(focused_attr, |s| CFRelease(s as *const std::ffi::c_void));
 
         let mut focused: *const std::ffi::c_void = std::ptr::null();
-        let err = AXUIElementCopyAttributeValue(
-            system_wide,
-            focused_attr,
-            &mut focused as *mut _,
-        );
+        let err = AXUIElementCopyAttributeValue(system_wide, focused_attr, &mut focused as *mut _);
         if err != AX_ERROR_SUCCESS || focused.is_null() {
             return Err(format!(
                 "No focused element (AXError {}). Verify Accessibility permission is granted and a focused text field exists.",
@@ -217,9 +271,8 @@ pub fn capture_focus() -> Result<FocusSnapshot, String> {
             let role_attr = cf_string_const("AXRole");
             match role_attr {
                 Some(role_attr) => {
-                    let _role_attr_guard = scopeguard::guard(role_attr, |s| {
-                        CFRelease(s as *const std::ffi::c_void)
-                    });
+                    let _role_attr_guard =
+                        scopeguard::guard(role_attr, |s| CFRelease(s as *const std::ffi::c_void));
                     let mut role_value: *const std::ffi::c_void = std::ptr::null();
                     let err = AXUIElementCopyAttributeValue(
                         focused_elem,
@@ -280,8 +333,7 @@ pub fn activate_pid(pid: i32) -> Result<(), String> {
         }
 
         let activated: bool = if can_yield_activation() {
-            let current: Id =
-                msg_send![class!(NSRunningApplication), currentApplication];
+            let current: Id = msg_send![class!(NSRunningApplication), currentApplication];
             if !current.is_null() {
                 let _: () = msg_send![current, yieldActivationToApplication: target];
             }
@@ -429,17 +481,17 @@ mod win {
             if !IsWindowVisible(hwnd).as_bool() {
                 return BOOL(1);
             }
-            if !GetWindow(hwnd, GW_OWNER).unwrap_or(HWND(std::ptr::null_mut())).is_invalid() {
+            if !GetWindow(hwnd, GW_OWNER)
+                .unwrap_or(HWND(std::ptr::null_mut()))
+                .is_invalid()
+            {
                 return BOOL(1);
             }
             ctx.found = Some(hwnd);
             BOOL(0)
         }
         unsafe {
-            let _ = EnumWindows(
-                Some(callback),
-                LPARAM(&mut ctx as *mut _ as isize),
-            );
+            let _ = EnumWindows(Some(callback), LPARAM(&mut ctx as *mut _ as isize));
         }
         ctx.found
     }

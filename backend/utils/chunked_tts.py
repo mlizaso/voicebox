@@ -315,6 +315,8 @@ def split_text_into_chunks(text: str, max_chars: int = DEFAULT_MAX_CHUNK_CHARS) 
     Paralinguistic tags like ``[laugh]`` are treated as atomic and will not
     be split across chunks.
     """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
     text = text.strip()
     if not text:
         return []

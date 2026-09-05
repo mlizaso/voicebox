@@ -15,25 +15,11 @@ const PLATFORM_ALIAS: Record<string, string> = {
   windows: 'windows',
 };
 
-function getPublicOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get('x-forwarded-host');
-  const forwardedProto = request.headers.get('x-forwarded-proto');
-
-  if (forwardedHost && forwardedProto) {
-    // Behind reverse proxies/CDNs, request.url can be an internal origin
-    // (for example localhost:8080). Prefer forwarded headers so redirects
-    // keep users on the public domain.
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-
-  return new URL(request.url).origin;
-}
-
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ platform: string }> },
 ) {
-  const origin = getPublicOrigin(request);
+  const origin = 'https://voicebox.sh';
   const { platform } = await params;
   // No prebuilt Linux binary yet — send straight to the build-from-source page.
   if (platform === 'linux') {

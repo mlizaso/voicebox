@@ -72,6 +72,12 @@ export function VoiceInspector({ profileId }: VoiceInspectorProps) {
   const [avatarError, setAvatarError] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    return () => {
+      if (avatarPreview?.startsWith('blob:')) URL.revokeObjectURL(avatarPreview);
+    };
+  }, [avatarPreview]);
+
   const [effectsChain, setEffectsChain] = useState<EffectConfig[]>([]);
   const [effectsDirty, setEffectsDirty] = useState(false);
 

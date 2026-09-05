@@ -111,7 +111,6 @@ Run `just --list` to see all available commands. Highlights:
 
 | Command | Description |
 |---------|-------------|
-| `just generate-api` | Generate TypeScript API client from the backend's OpenAPI schema |
 | `just docs` | Open `http://localhost:17493/docs` in your browser |
 | `just logs` | Tail backend logs |
 | `just clean` | Remove build artifacts |
@@ -183,16 +182,6 @@ See [Model Management](/developer/model-management) for the full list.
 <Callout type="warn">
   First-time usage will be slower due to model downloads, but subsequent runs will use cached models.
 </Callout>
-
-## Generate OpenAPI Client
-
-After starting the backend server, generate the TypeScript API client:
-
-```bash
-just generate-api
-```
-
-This downloads the OpenAPI schema and generates the TypeScript client in `app/src/lib/api/`.
 
 ## Manual Setup (Advanced)
 
@@ -289,11 +278,6 @@ bun run tauri dev
     - Try rebuilding: `just dev`
   </Accordion>
 
-  <Accordion title="OpenAPI client generation fails">
-    - Ensure backend is running: `curl http://localhost:17493/openapi.json`
-    - Check network connectivity
-    - Verify the backend is accessible at localhost:17493
-  </Accordion>
 </AccordionGroup>
 
 See the full [Troubleshooting Guide](/overview/troubleshooting) for more issues and solutions.

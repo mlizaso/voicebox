@@ -319,6 +319,7 @@ class LocalAPISecurityMiddleware:
             await self._reject(scope, send, 400, "Untrusted Host header")
             return
 
+        trusted_local_request = _client_is_loopback(scope) and _host_is_local(host)
         origin_headers = _headers(scope, b"origin")
         if len(origin_headers) > 1:
             await self._reject(scope, send, 403, "Invalid Origin header")
@@ -340,11 +341,21 @@ class LocalAPISecurityMiddleware:
                 await self._reject(scope, send, 403, "Untrusted Origin")
                 return
         elif any(value.lower() == "cross-site" for value in _headers(scope, b"sec-fetch-site")):
-            await self._reject(scope, send, 403, "Cross-site browser request rejected")
-            return
+            # Cloud pairing returns via a top-level redirect. That one local
+            # callback authenticates the redirect with a single-use state;
+            # other cross-site reads and mutations remain forbidden.
+            cloud_redirect = (
+                trusted_local_request
+                and scope.get("method") == "GET"
+                and scope.get("path") == "/cloud/callback"
+                and _headers(scope, b"sec-fetch-mode") == ["navigate"]
+                and _headers(scope, b"sec-fetch-dest") == ["document"]
+            )
+            if not cloud_redirect:
+                await self._reject(scope, send, 403, "Cross-site browser request rejected")
+                return
 
         authenticated_by_bearer = False
-        trusted_local_request = _client_is_loopback(scope) and _host_is_local(host)
         # Inner application code must not re-derive locality from the socket
         # peer alone: a documented same-host reverse proxy also appears as
         # 127.0.0.1. Publish the already-verified peer+Host decision through

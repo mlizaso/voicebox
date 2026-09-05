@@ -1,13 +1,12 @@
 import { RouterProvider } from '@tanstack/react-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import voiceboxLogo from '@/assets/voicebox-logo.png';
 import { DictateWindow } from '@/components/DictateWindow/DictateWindow';
 import ShinyText from '@/components/ShinyText';
 import { TitleBarDragRegion } from '@/components/TitleBarDragRegion';
+import { Input } from '@/components/ui/input';
 import { useAutoUpdater } from '@/hooks/useAutoUpdater';
 import { useThemeSync } from '@/hooks/useThemeSync';
-import { apiClient } from '@/lib/api/client';
-import type { HealthResponse } from '@/lib/api/types';
 import { TOP_SAFE_AREA_PADDING } from '@/lib/constants/ui';
 import { useChordSync } from '@/lib/hooks/useChordSync';
 import { cn } from '@/lib/utils/cn';
@@ -23,33 +22,6 @@ import {
 function isDictateView(): boolean {
   if (typeof window === 'undefined') return false;
   return new URLSearchParams(window.location.search).get('view') === 'dictate';
-}
-
-/**
- * Validate that a health response has the expected Voicebox-specific shape.
- * Prevents misidentifying an unrelated service on the same port.
- */
-function isVoiceboxHealthResponse(health: HealthResponse): boolean {
-  return (
-    health?.status === 'healthy' &&
-    typeof health.model_loaded === 'boolean' &&
-    typeof health.gpu_available === 'boolean'
-  );
-}
-
-/**
- * Check whether a startup error indicates the port is occupied by an external
- * server (which we should try to reuse via health-check polling) vs. a real
- * failure (missing sidecar, signing issue, etc.) that should surface immediately.
- */
-function isPortInUseError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error);
-  return (
-    msg.includes('already in use') ||
-    msg.includes('port') ||
-    msg.includes('EADDRINUSE') ||
-    msg.includes('address already in use')
-  );
 }
 
 const LOADING_MESSAGES = [
@@ -95,13 +67,50 @@ function MainApp() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const serverStartingRef = useRef(false);
+  const remoteApiToken = useServerStore((state) => state.remoteApiToken);
+
+  const startServer = useCallback(
+    async (allowExternal = false) => {
+      if (serverStartingRef.current) return;
+      serverStartingRef.current = true;
+      setStartupError(null);
+      const state = useServerStore.getState();
+      try {
+        const url = await platform.lifecycle.startServer(
+          state.mode === 'remote',
+          state.customModelsDir,
+          state.remoteApiToken || null,
+          allowExternal,
+        );
+        state.setServerUrl(url);
+        window.__voiceboxServerStartedByApp = !allowExternal;
+        setServerReady(true);
+      } catch (error) {
+        window.__voiceboxServerStartedByApp = false;
+        setStartupError(error instanceof Error ? error.message : String(error));
+      } finally {
+        serverStartingRef.current = false;
+      }
+    },
+    [platform.lifecycle],
+  );
+
+  useEffect(() => {
+    if (!platform.metadata.isTauri) return;
+    const syncConnection = () => {
+      const { connectionId, serverUrl, remoteApiToken, mode } = useServerStore.getState();
+      void platform.lifecycle
+        .setClientConnection({ connectionId, serverUrl, remoteApiToken, mode })
+        .catch(() => console.error('Could not share the connection with the dictation window'));
+    };
+    syncConnection();
+    return useServerStore.subscribe((state, previous) => {
+      if (state.connectionId !== previous.connectionId) syncConnection();
+    });
+  }, [platform.lifecycle, platform.metadata.isTauri]);
 
   // Automatically check for app updates on startup and show toast notifications
   useAutoUpdater({ checkOnMount: true, showToast: true });
-
-  // Replay the saved chord into the Rust hotkey listener every time
-  // capture_settings resolves or the user edits the chord.
-  useChordSync();
 
   // Sync stored setting to Rust on startup
   useEffect(() => {
@@ -119,6 +128,17 @@ function MainApp() {
   useEffect(() => {
     platform.lifecycle.onServerReady = () => {
       setServerReady(true);
+      setStartupError(null);
+    };
+    platform.lifecycle.onServerStopped = () => {
+      window.__voiceboxServerStartedByApp = false;
+      if (!isLoopbackVoiceboxServerUrl(useServerStore.getState().serverUrl)) return;
+      setServerReady(false);
+      setStartupError('The server stopped. Retry to reconnect.');
+    };
+    return () => {
+      platform.lifecycle.onServerReady = undefined;
+      platform.lifecycle.onServerStopped = undefined;
     };
     // Empty dependency array - platform is stable from context, only run once
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,6 +172,14 @@ function MainApp() {
       return;
     }
 
+    // An explicitly configured external server does not need a local sidecar.
+    // Show settings so the user can enter its memory-only token each session.
+    if (!isLoopbackVoiceboxServerUrl(useServerStore.getState().serverUrl)) {
+      window.__voiceboxServerStartedByApp = false;
+      setServerReady(true);
+      return;
+    }
+
     // Only auto-start server in production mode
     // In dev mode, user runs server separately
     if (!import.meta.env?.PROD) {
@@ -162,76 +190,11 @@ function MainApp() {
       return;
     }
 
-    // Auto-start server in production
-    if (serverStartingRef.current) {
-      return;
-    }
-
-    serverStartingRef.current = true;
-    const isRemote = useServerStore.getState().mode === 'remote';
-    const customModelsDir = useServerStore.getState().customModelsDir;
-    const remoteApiToken = useServerStore.getState().remoteApiToken;
-    console.log(`Production mode: Starting bundled server... (remote: ${isRemote})`);
-
-    platform.lifecycle
-      .startServer(isRemote, customModelsDir, remoteApiToken || null)
-      .then((serverUrl) => {
-        console.log('Server is ready at:', serverUrl);
-        // Update the server URL in the store with the dynamically assigned port
-        useServerStore.getState().setServerUrl(serverUrl);
-        setServerReady(true);
-        // Mark that we started the server (so we know to stop it on close)
-        window.__voiceboxServerStartedByApp = true;
-      })
-      .catch((error) => {
-        console.error('Failed to auto-start server:', error);
-        serverStartingRef.current = false;
-        window.__voiceboxServerStartedByApp = false;
-
-        // Only fall back to health-check polling when the error indicates the
-        // port is occupied (likely an external server). For real failures
-        // (missing sidecar, signing issues, etc.) surface the error immediately.
-        if (!isPortInUseError(error)) {
-          const msg = error instanceof Error ? error.message : String(error);
-          console.error('Real startup failure — not polling:', msg);
-          setStartupError(msg);
-          return;
-        }
-
-        // Fall back to polling: the server may already be running externally
-        // (e.g. started via python/uvicorn/Docker). Poll the health endpoint
-        // until it responds with a valid Voicebox payload, then transition to
-        // the main UI.
-        console.log('Falling back to health-check polling...');
-        const pollInterval = setInterval(async () => {
-          try {
-            const health = await apiClient.getHealth();
-            if (!isVoiceboxHealthResponse(health)) {
-              console.log('Health response is not from a Voicebox server, keep polling...');
-              return;
-            }
-            console.log('External Voicebox server detected via health check');
-            clearInterval(pollInterval);
-            setServerReady(true);
-          } catch {
-            // Server not ready yet, keep polling
-          }
-        }, 2000);
-
-        // Stop polling after 2 minutes and surface the failure
-        setTimeout(() => {
-          clearInterval(pollInterval);
-          serverStartingRef.current = false;
-          setStartupError(
-            'Could not connect to a Voicebox server within 2 minutes. ' +
-              'Please check that the server is running and try again.',
-          );
-        }, 120_000);
-      });
+    void startServer();
 
     // Empty dependency array - platform is stable from context, only run once
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform.metadata.isTauri, platform.lifecycle]);
+  }, [platform.metadata.isTauri, startServer]);
 
   // Cycle through loading messages every 3 seconds
   useEffect(() => {
@@ -271,15 +234,32 @@ function MainApp() {
             <div className="animate-fade-in-delayed max-w-md mx-auto space-y-3">
               <p className="text-lg font-medium text-destructive">Server startup failed</p>
               <p className="text-sm text-muted-foreground">{startupError}</p>
+              {useServerStore.getState().mode === 'remote' && (
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label="Remote API token for this session"
+                  placeholder="Remote API token for this session"
+                  value={remoteApiToken}
+                  onChange={(event) =>
+                    useServerStore.getState().setRemoteApiToken(event.target.value)
+                  }
+                />
+              )}
+              {startupError.includes('already in use') && (
+                <button
+                  type="button"
+                  className="px-4 py-2 text-sm rounded-md border hover:bg-accent"
+                  onClick={() => void startServer(true)}
+                >
+                  Connect to my running server
+                </button>
+              )}
               <button
                 type="button"
                 className="mt-2 px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-                onClick={() => {
-                  setStartupError(null);
-                  serverStartingRef.current = false;
-                  // Trigger a re-mount of the effect by toggling state
-                  window.location.reload();
-                }}
+                onClick={() => void startServer()}
               >
                 Retry
               </button>
@@ -300,6 +280,11 @@ function MainApp() {
     );
   }
 
+  return <ConnectedApp />;
+}
+
+function ConnectedApp() {
+  useChordSync();
   return <RouterProvider router={router} />;
 }
 

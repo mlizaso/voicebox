@@ -41,10 +41,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// the pill from surfacing for minutes.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
-pub fn spawn_speak_monitor(app: AppHandle) {
+pub fn spawn_speak_monitor(app: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         run(app).await;
-    });
+    })
 }
 
 async fn run(app: AppHandle) {
@@ -119,6 +119,9 @@ async fn stream_once(
             }
         };
         saw_data = true;
+        if buf.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err("Speak event frame exceeds 1 MiB".into());
+        }
         buf.push_str(std::str::from_utf8(&chunk)?);
         // sse-starlette emits CRLF framing; the spec also permits LF, so
         // handle either. Drain whichever separator appears first.

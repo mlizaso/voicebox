@@ -45,8 +45,6 @@ export function useExportGeneration() {
 
   return useMutation({
     mutationFn: async ({ generationId, text }: { generationId: string; text: string }) => {
-      const blob = await apiClient.exportGeneration(generationId);
-
       // Create safe filename from text. Append a short id so exports of
       // similarly-worded generations don't collide on the same filename
       // (the first 30 chars are frequently identical).
@@ -56,14 +54,17 @@ export function useExportGeneration() {
         .toLowerCase();
       const filename = `generation-${safeText}-${generationId.substring(0, 8)}.voicebox.zip`;
 
-      await platform.filesystem.saveFile(filename, blob, [
-        {
-          name: 'Voicebox Generation',
-          extensions: ['zip'],
-        },
-      ]);
-
-      return blob;
+      return platform.filesystem.saveResponse(
+        filename,
+        () => apiClient.exportGeneration(generationId),
+        516 * 1024 * 1024,
+        [
+          {
+            name: 'Voicebox Generation',
+            extensions: ['zip'],
+          },
+        ],
+      );
     },
   });
 }
@@ -73,8 +74,6 @@ export function useExportGenerationAudio() {
 
   return useMutation({
     mutationFn: async ({ generationId, text }: { generationId: string; text: string }) => {
-      const blob = await apiClient.exportGenerationAudio(generationId);
-
       // Create safe filename from text. Append a short id so exports of
       // similarly-worded generations don't collide on the same filename
       // (the first 30 chars are frequently identical).
@@ -84,14 +83,17 @@ export function useExportGenerationAudio() {
         .toLowerCase();
       const filename = `${safeText}-${generationId.substring(0, 8)}.wav`;
 
-      await platform.filesystem.saveFile(filename, blob, [
-        {
-          name: 'Audio File',
-          extensions: ['wav'],
-        },
-      ]);
-
-      return blob;
+      return platform.filesystem.saveResponse(
+        filename,
+        () => apiClient.exportGenerationAudio(generationId),
+        44 + 24 * 60 * 60 * 192_000 * 2,
+        [
+          {
+            name: 'Audio File',
+            extensions: ['wav'],
+          },
+        ],
+      );
     },
   });
 }

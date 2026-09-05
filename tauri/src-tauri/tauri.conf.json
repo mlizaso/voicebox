@@ -36,7 +36,7 @@
   "app": {
     "macOSPrivateApi": true,
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' blob: data: http: https:; connect-src 'self' ipc: http: https: ws: wss:; font-src 'self' data:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'",
       "capabilities": ["default"]
     },
     "windows": [
@@ -53,12 +53,9 @@
         "titleBarStyle": "Overlay"
       }
     ],
-    "withGlobalTauri": true
+    "withGlobalTauri": false
   },
   "plugins": {
-    "shell": {
-      "open": ".*"
-    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxRENBQkRBQjdBNTM1OTIKUldTU05hVzMycXZjNGJGcUxmcVVocll2QjdSaTJNdlFxR2M3VDJsMnVvbDdyZGRPMmRlOW9aWTcK",
       "endpoints": ["https://github.com/jamiepine/voicebox/releases/latest/download/latest.json"]

@@ -1,18 +1,22 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { toast } from '@/components/ui/use-toast';
 import { queryClient } from '@/lib/queryClient';
+import type { ServerConnection } from '@/platform/types';
+import { useGenerationStore } from './generationStore';
+import { usePlayerStore } from './playerStore';
+import { useStoryStore } from './storyStore';
+import { useUIStore } from './uiStore';
 
-interface ServerStore {
-  serverUrl: string;
+interface ServerStore extends ServerConnection {
+  setConnection: (connection: ServerConnection) => boolean;
   setServerUrl: (url: string) => void;
 
-  remoteApiToken: string;
   setRemoteApiToken: (token: string) => void;
 
   isConnected: boolean;
   setIsConnected: (connected: boolean) => void;
 
-  mode: 'local' | 'remote';
   setMode: (mode: 'local' | 'remote') => void;
 
   keepServerRunningOnClose: boolean;
@@ -22,12 +26,45 @@ interface ServerStore {
   setCustomModelsDir: (dir: string | null) => void;
 }
 
-/**
- * Invalidate all React Query caches so stale data from the previous
- * server is not shown. Called when the server URL changes.
- */
-function invalidateAllServerData() {
-  queryClient.invalidateQueries();
+function canChangeConnection(): boolean {
+  if (queryClient.isMutating() === 0) return true;
+  toast({
+    title: 'An operation is still running',
+    description: 'Wait for it to finish before changing servers or credentials.',
+    variant: 'destructive',
+  });
+  return false;
+}
+
+function newConnectionId(): string {
+  // getRandomValues also works when the web UI was opened over plain HTTP;
+  // the connection validator can then explain why remote requests are blocked.
+  return crypto.getRandomValues(new Uint32Array(4)).join('-');
+}
+
+/** Drop the previous server's data before requesting the new identity's data. */
+function resetServerData() {
+  usePlayerStore.getState().reset();
+  useStoryStore.getState().stop();
+  useStoryStore.setState({ selectedStoryId: null, selectedClipId: null });
+  useGenerationStore.setState({
+    pendingGenerationIds: new Set(),
+    pendingStoryAdds: new Map(),
+    isGenerating: false,
+    activeGenerationId: null,
+  });
+  useUIStore.setState({
+    selectedProfileId: null,
+    selectedVoiceId: null,
+    editingProfileId: null,
+    profileFormDraft: null,
+    profileDialogOpen: false,
+    generationDialogOpen: false,
+  });
+  queryClient.getMutationCache().clear();
+  // resetQueries cancels in-flight queries, clears their data, notifies mounted
+  // observers and refetches active queries using the updated connection.
+  void queryClient.resetQueries();
 }
 
 export function getDefaultServerUrl(): string {
@@ -63,21 +100,34 @@ export function isLoopbackVoiceboxServerUrl(url: string): boolean {
 export const useServerStore = create<ServerStore>()(
   persist(
     (set, get) => ({
+      connectionId: newConnectionId(),
+      setConnection: (connection) => {
+        if (connection.connectionId === get().connectionId) return true;
+        if (!canChangeConnection()) return false;
+        set({ ...connection, isConnected: false });
+        resetServerData();
+        return true;
+      },
       serverUrl: getDefaultServerUrl(),
       setServerUrl: (url) => {
         const prev = get().serverUrl;
-        set({ serverUrl: url });
-        if (url !== prev) {
-          invalidateAllServerData();
+        if (url !== prev && canChangeConnection()) {
+          set({
+            serverUrl: url,
+            remoteApiToken: '',
+            connectionId: newConnectionId(),
+            isConnected: false,
+          });
+          resetServerData();
         }
       },
 
       remoteApiToken: '',
       setRemoteApiToken: (token) => {
         const prev = get().remoteApiToken;
-        set({ remoteApiToken: token });
-        if (token !== prev) {
-          invalidateAllServerData();
+        if (token !== prev && canChangeConnection()) {
+          set({ remoteApiToken: token, connectionId: newConnectionId(), isConnected: false });
+          resetServerData();
         }
       },
 
@@ -85,7 +135,12 @@ export const useServerStore = create<ServerStore>()(
       setIsConnected: (connected) => set({ isConnected: connected }),
 
       mode: 'local',
-      setMode: (mode) => set({ mode }),
+      setMode: (mode) => {
+        if (mode !== get().mode && canChangeConnection()) {
+          set({ mode, connectionId: newConnectionId(), isConnected: false });
+          resetServerData();
+        }
+      },
 
       keepServerRunningOnClose: false,
       setKeepServerRunningOnClose: (keepRunning) => set({ keepServerRunningOnClose: keepRunning }),
@@ -95,6 +150,23 @@ export const useServerStore = create<ServerStore>()(
     }),
     {
       name: 'voicebox-server',
+      version: 1,
+      partialize: (state) => ({
+        serverUrl: state.serverUrl,
+        mode: state.mode,
+        keepServerRunningOnClose: state.keepServerRunningOnClose,
+        customModelsDir: state.customModelsDir,
+      }),
+      // Persist only connection preferences. Upgrading rewrites storage without
+      // the reusable bearer token previously saved by version 0.
+      migrate: (persisted) => {
+        const {
+          remoteApiToken: _token,
+          isConnected: _connected,
+          ...preferences
+        } = persisted as ServerStore;
+        return preferences;
+      },
     },
   ),
 );

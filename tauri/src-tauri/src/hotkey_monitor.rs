@@ -132,7 +132,10 @@ impl HotkeyMonitor {
             .spawn(move || dispatcher_loop(app, matcher, shutdown_for_thread))
             .expect("spawn hotkey dispatcher thread");
 
-        self.active = Some(Active { dispatcher, shutdown });
+        self.active = Some(Active {
+            dispatcher,
+            shutdown,
+        });
     }
 }
 
@@ -153,28 +156,19 @@ fn build_matcher(bindings: &Bindings) -> Result<ChordMatcher<ChordAction>, keyta
     let mut builder = ChordMatcher::builder();
     if let Some(keys) = bindings.get(&ChordAction::PushToTalk) {
         if !keys.is_empty() {
-            builder = builder.add(
-                ChordAction::PushToTalk,
-                Chord::of(keys.iter().copied()),
-            );
+            builder = builder.add(ChordAction::PushToTalk, Chord::of(keys.iter().copied()));
         }
     }
     if let Some(keys) = bindings.get(&ChordAction::ToggleToTalk) {
         if !keys.is_empty() {
-            builder = builder.add_toggle(
-                ChordAction::ToggleToTalk,
-                Chord::of(keys.iter().copied()),
-            );
+            builder =
+                builder.add_toggle(ChordAction::ToggleToTalk, Chord::of(keys.iter().copied()));
         }
     }
     builder.build()
 }
 
-fn dispatcher_loop(
-    app: AppHandle,
-    matcher: ChordMatcher<ChordAction>,
-    shutdown: Arc<AtomicBool>,
-) {
+fn dispatcher_loop(app: AppHandle, matcher: ChordMatcher<ChordAction>, shutdown: Arc<AtomicBool>) {
     while !shutdown.load(Ordering::Relaxed) {
         match matcher.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => process_event(&app, &matcher, event),
@@ -197,7 +191,10 @@ fn process_event(
         ChordEvent::Start { id, .. } => {
             apply_effect(app, Effect::StartRecording(id));
         }
-        ChordEvent::End { id: end_id, time: end_time } => {
+        ChordEvent::End {
+            id: end_id,
+            time: end_time,
+        } => {
             // Peek for an immediately-following Start. keytap emits
             // End+Start atomically (same Instant) when the held set
             // transitions between registered chords — our 5 ms window
@@ -205,9 +202,10 @@ fn process_event(
             // channel hop between keytap's chord worker and our
             // dispatcher.
             match matcher.recv_timeout(Duration::from_millis(5)) {
-                Ok(ChordEvent::Start { id: start_id, time: start_time })
-                    if start_time == end_time =>
-                {
+                Ok(ChordEvent::Start {
+                    id: start_id,
+                    time: start_time,
+                }) if start_time == end_time => {
                     apply_effect(app, Effect::RestartRecording(start_id));
                 }
                 Ok(other) => {
@@ -237,7 +235,10 @@ fn apply_effect(app: &AppHandle, effect: Effect) {
             // reshuffle triggered by set_position / show could in principle
             // steal key focus and poison the reading. In practice those
             // calls leave keyWindow alone, but capturing first is free.
-            let focus = focus_capture::capture_focus().ok();
+            let focus = focus_capture::capture_focus().ok().map(|snapshot| {
+                app.state::<focus_capture::PendingFocusTargets>()
+                    .register(snapshot)
+            });
 
             if let Some(window) = app.get_webview_window(DICTATE_WINDOW_LABEL) {
                 // The previous hide-cycle parked the window off-screen and
@@ -258,8 +259,8 @@ fn apply_effect(app: &AppHandle, effect: Effect) {
                     let monitor_pos = monitor.position();
                     let monitor_size = monitor.size();
                     if let Ok(win_size) = window.outer_size() {
-                        let x = monitor_pos.x
-                            + (monitor_size.width as i32 - win_size.width as i32) / 2;
+                        let x =
+                            monitor_pos.x + (monitor_size.width as i32 - win_size.width as i32) / 2;
                         let y = monitor_pos.y + (monitor_size.height as f64 * 0.04) as i32;
                         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
                     }

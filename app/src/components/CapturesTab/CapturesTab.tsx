@@ -75,6 +75,7 @@ import { usePlatform } from '@/platform/PlatformContext';
 import type { SavedFile } from '@/platform/types';
 import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
+import { useServerStore } from '@/stores/serverStore';
 
 const CAPTURE_AUDIO_MIME = 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm';
 // Keep aligned with backend/utils/upload_limits.py:AUDIO_UPLOAD_MAX_BYTES.
@@ -207,6 +208,7 @@ export function CapturesTab() {
   // actually containing the new row.
   useEffect(() => {
     const unsubscribeCreated = platform.events.subscribe('capture:created', (payload) => {
+      if (payload.connectionId !== useServerStore.getState().connectionId) return;
       const capture = payload?.capture;
       if (capture) {
         queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
@@ -218,7 +220,8 @@ export function CapturesTab() {
       }
       queryClient.invalidateQueries({ queryKey: ['captures'] });
     });
-    const unsubscribeUpdated = platform.events.subscribe('capture:updated', () => {
+    const unsubscribeUpdated = platform.events.subscribe('capture:updated', (payload) => {
+      if (payload.connectionId !== useServerStore.getState().connectionId) return;
       queryClient.invalidateQueries({ queryKey: ['captures'] });
     });
     return () => {

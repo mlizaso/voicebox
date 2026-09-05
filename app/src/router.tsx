@@ -113,7 +113,7 @@ const voicesRoute = createRoute({
   component: VoicesTab,
 });
 
-// Captures route (prototype — will replace AudioTab once the new flow is ready)
+// Captures and dictation recordings.
 const capturesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/captures',

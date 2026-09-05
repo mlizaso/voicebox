@@ -115,14 +115,6 @@ just build-server
 
 This makes PyInstaller use your local qwen-tts version instead of the pip-installed package.
 
-### Generate OpenAPI Client
-
-After starting the backend server:
-```bash
-./scripts/generate-api.sh
-```
-This downloads the OpenAPI schema and generates the TypeScript client in `app/src/lib/api/`
-
 ### Convert Assets to Web Formats
 
 To optimize images and videos for the web, run:
@@ -293,19 +285,20 @@ When adding new API endpoints:
 2. **Create Pydantic models in `backend/models.py`**
 3. **Implement business logic in appropriate module**
 4. **Update OpenAPI schema** (automatic with FastAPI)
-5. **Regenerate TypeScript client:**
-   ```bash
-   bun run generate:api
-   ```
+5. **Update the app API client** in `app/src/lib/api/client.ts` and `types.ts` when the app consumes the endpoint.
 6. **Update `backend/README.md`** with endpoint documentation
 
 ## Testing
 
-Currently, testing is primarily manual. When adding tests:
+Run the checks for the code you change:
 
-- **Backend**: Use pytest for Python tests
-- **Frontend**: Use Vitest for React component tests
-- **E2E**: Use Playwright for end-to-end tests (future)
+- **Backend**: `backend/venv/bin/python -m pytest backend/tests`; use the backend Ruff configuration for linting and formatting.
+- **App, web, and desktop frontend**: `bun run ci` runs Bun tests, import-boundary checks, TypeScript checks, and production builds. App tests are also typechecked.
+- **Landing page**: `bun run --cwd landing test` and `bun run build:landing`.
+- **Documentation**: `bun run --cwd docs test` and `bun run --cwd docs build`.
+- **Native desktop**: run `cargo check --all-targets` and `cargo test --bin voicebox` in `tauri/src-tauri`. Hardware capture, playback, and packaged sidecar checks require the target OS and are separate from these unit tests.
+
+See [the September 2026 audit](docs/SECURITY_AUDIT_2026-09-05.md) for known dependency constraints and validation limits.
 
 ## Pull Request Process
 
@@ -365,7 +358,6 @@ See [docs/content/docs/overview/troubleshooting.mdx](docs/content/docs/overview/
 
 - **Backend won't start:** Check Python version (3.11+), ensure venv is activated, install dependencies
 - **Tauri build fails:** Ensure Rust is installed, clean build with `cd tauri/src-tauri && cargo clean`
-- **OpenAPI client generation fails:** Ensure backend is running, check `curl http://localhost:17493/openapi.json`
 
 ## Questions?
 

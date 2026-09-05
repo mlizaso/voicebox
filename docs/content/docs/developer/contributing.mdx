@@ -258,19 +258,16 @@ When adding new API endpoints:
     ```
   </Step>
 
-  <Step title="Regenerate Client">
-    ```bash
-    just generate-api
-    ```
-
-    This updates the TypeScript client with type-safe bindings.
+  <Step title="Update the App Client">
+    Update `app/src/lib/api/client.ts` and `types.ts` for endpoints consumed by the app.
   </Step>
 
   <Step title="Update Docs">
     The API documentation is automatically generated from the OpenAPI schema. Ensure your endpoint has proper docstrings and type hints, then regenerate the docs:
     
     ```bash
-    just generate-api
+    cd docs
+    bun scripts/generate-openapi.ts
     ```
   </Step>
 </Steps>

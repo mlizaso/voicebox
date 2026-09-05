@@ -300,7 +300,9 @@ def test_store_quota_bounds_repeated_profile_edits(monkeypatch, tmp_path):
 def test_free_space_reserve_fails_before_copy(monkeypatch, tmp_path):
     data_dir, db = _database(monkeypatch, tmp_path)
     _profile_with_sample(data_dir, db)
-    free = profiles.shutil.disk_usage(data_dir).free
+    disk_usage = profiles.shutil.disk_usage(data_dir)
+    monkeypatch.setattr(profiles.shutil, "disk_usage", lambda _path: disk_usage)
+    free = disk_usage.free
     monkeypatch.setattr(profiles, "EXACT_VOICE_SNAPSHOT_MIN_FREE_BYTES", free + 1)
 
     with pytest.raises(
@@ -346,7 +348,9 @@ def test_derived_reserve_is_checked_before_combining(monkeypatch, tmp_path):
         "backend.backends.get_tts_implementation_revision",
         lambda: "runtime-revision",
     )
-    free = profiles.shutil.disk_usage(data_dir).free
+    disk_usage = profiles.shutil.disk_usage(data_dir)
+    monkeypatch.setattr(profiles.shutil, "disk_usage", lambda _path: disk_usage)
+    free = disk_usage.free
     monkeypatch.setattr(profiles, "EXACT_VOICE_SNAPSHOT_MIN_FREE_BYTES", free + 1)
 
     with pytest.raises(profiles.ExactVoiceSnapshotCapacityError):

@@ -121,21 +121,22 @@ export function useExportProfile() {
 
   return useMutation({
     mutationFn: async (profileId: string) => {
-      const blob = await apiClient.exportProfile(profileId);
-
       // Get profile name for filename
       const profile = await apiClient.getProfile(profileId);
       const safeName = profile.name.replace(/[^a-z0-9]/gi, '-').toLowerCase();
       const filename = `profile-${safeName}.voicebox.zip`;
 
-      await platform.filesystem.saveFile(filename, blob, [
-        {
-          name: 'Voicebox Profile',
-          extensions: ['zip'],
-        },
-      ]);
-
-      return blob;
+      return platform.filesystem.saveResponse(
+        filename,
+        () => apiClient.exportProfile(profileId),
+        516 * 1024 * 1024,
+        [
+          {
+            name: 'Voicebox Profile',
+            extensions: ['zip'],
+          },
+        ],
+      );
     },
   });
 }

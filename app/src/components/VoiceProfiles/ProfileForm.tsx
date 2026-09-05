@@ -224,6 +224,7 @@ export function ProfileForm() {
 
   const {
     isRecording,
+    audioStream,
     duration,
     error: recordingError,
     startRecording,
@@ -1002,6 +1003,7 @@ export function ProfileForm() {
                                 name="sampleFile"
                                 render={() => (
                                   <AudioSampleRecording
+                                    audioStream={audioStream}
                                     file={selectedFile}
                                     isRecording={isRecording}
                                     duration={duration}
@@ -1207,9 +1209,7 @@ export function ProfileForm() {
                             {...field}
                           />
                         </FormControl>
-                        <FormDescription>
-                          {t('profileForm.fields.personalityHint')}
-                        </FormDescription>
+                        <FormDescription>{t('profileForm.fields.personalityHint')}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}

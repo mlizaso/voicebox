@@ -34,6 +34,18 @@ use objc::runtime::Object;
 #[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
 
+const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+
+fn reserve_snapshot_bytes(total: &mut usize, additional: usize) -> Result<(), String> {
+    if additional > MAX_SNAPSHOT_BYTES.saturating_sub(*total) {
+        return Err(
+            "Clipboard is too large to preserve safely; copy the transcript manually".into(),
+        );
+    }
+    *total += additional;
+    Ok(())
+}
+
 /// One full-fidelity snapshot of the general pasteboard. Hold on to the value
 /// until the paste has landed, then pass it to [`restore_clipboard`].
 #[derive(Debug, Clone)]
@@ -42,21 +54,6 @@ pub struct ClipboardSnapshot {
     /// store the raw UTI string and the raw `NSData` payload so we can rebuild
     /// the item with `setData:forType:` without interpreting the contents.
     items: Vec<Vec<(String, Vec<u8>)>>,
-    /// `NSPasteboard.changeCount` at the moment of capture. Incremented by AppKit
-    /// on every mutation from any process, so a caller can decide whether a
-    /// restore is still safe (change_count == expected) or whether someone
-    /// else wrote to the clipboard in the interim and we should back off.
-    change_count: i64,
-}
-
-impl ClipboardSnapshot {
-    pub fn change_count(&self) -> i64 {
-        self.change_count
-    }
-
-    pub fn item_count(&self) -> usize {
-        self.items.len()
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -147,17 +144,17 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
     unsafe {
         let _pool = AutoreleasePool::new();
         let pb = general_pasteboard()?;
-        let change_count: i64 = msg_send![pb, changeCount];
 
         let items: Id = msg_send![pb, pasteboardItems];
         if items.is_null() {
-            return Ok(ClipboardSnapshot {
-                items: Vec::new(),
-                change_count,
-            });
+            return Ok(ClipboardSnapshot { items: Vec::new() });
         }
 
         let count: usize = msg_send![items, count];
+        if count > 256 {
+            return Err("Too many clipboard items to preserve safely".into());
+        }
+        let mut total_bytes = 0;
         let mut saved: Vec<Vec<(String, Vec<u8>)>> = Vec::with_capacity(count);
 
         for i in 0..count {
@@ -170,6 +167,9 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
                 continue;
             }
             let type_count: usize = msg_send![types, count];
+            if type_count > 256 {
+                return Err("Too many clipboard formats to preserve safely".into());
+            }
             let mut pairs: Vec<(String, Vec<u8>)> = Vec::with_capacity(type_count);
             for j in 0..type_count {
                 let t: Id = msg_send![types, objectAtIndex: j];
@@ -183,6 +183,7 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
                     continue;
                 }
                 let length: usize = msg_send![data, length];
+                reserve_snapshot_bytes(&mut total_bytes, length)?;
                 let bytes_ptr: *const u8 = msg_send![data, bytes];
                 let bytes = if bytes_ptr.is_null() || length == 0 {
                     Vec::new()
@@ -194,10 +195,7 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
             saved.push(pairs);
         }
 
-        Ok(ClipboardSnapshot {
-            items: saved,
-            change_count,
-        })
+        Ok(ClipboardSnapshot { items: saved })
     }
 }
 
@@ -277,7 +275,7 @@ mod win {
     //! shape: a single outer "item" holding one `(format-name, bytes)`
     //! pair per enumerated format. Windows has no notion of multiple
     //! pasteboard items, so there's always exactly one or zero outer
-    //! entries — enough to keep `item_count()` meaningful without
+    //! entries — enough to preserve each clipboard format without
     //! fan-out.
     //!
     //! Format IDs are serialised as strings so the snapshot type can stay
@@ -484,7 +482,7 @@ mod win {
     /// clipboard into an owned `Vec<u8>`. Returns `Ok(None)` when the
     /// clipboard advertises the format but provides no concrete data
     /// (delay-rendered format that's never been realised).
-    pub fn read_format_bytes(format: u32) -> Result<Option<Vec<u8>>, String> {
+    pub fn read_format_bytes(format: u32, total: &mut usize) -> Result<Option<Vec<u8>>, String> {
         unsafe {
             let handle = GetClipboardData(format)
                 .map_err(|e| format!("GetClipboardData({format}) failed: {e}"))?;
@@ -493,6 +491,7 @@ mod win {
             }
             let hglobal = HGLOBAL(handle.0);
             let size = GlobalSize(hglobal);
+            super::reserve_snapshot_bytes(total, size)?;
             if size == 0 {
                 return Ok(Some(Vec::new()));
             }
@@ -625,10 +624,13 @@ pub fn current_change_count() -> Result<i64, String> {
 
 #[cfg(target_os = "windows")]
 pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
-    let change_count = win::sequence_number() as i64;
     let _guard = win::ClipboardGuard::open()?;
 
     let formats = win::enumerate_formats();
+    if formats.len() > 256 {
+        return Err("Too many clipboard formats to preserve safely".into());
+    }
+    let mut total_bytes = 0;
     let mut pairs: Vec<(String, Vec<u8>)> = Vec::with_capacity(formats.len());
     for id in formats {
         if win::is_skipped_format(id) || win::is_auto_synthesised(id) {
@@ -641,17 +643,9 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
                 None => continue,
             },
         };
-        match win::read_format_bytes(id) {
-            Ok(Some(bytes)) => pairs.push((name, bytes)),
-            Ok(None) => {}
-            Err(_) => {
-                // Single-format read failure (delay-render that never
-                // materialises, ACL-restricted format, etc.) shouldn't
-                // abort the whole snapshot — drop this format and keep
-                // going so the user's other clipboard contents still
-                // survive the round-trip.
-                continue;
-            }
+        match win::read_format_bytes(id, &mut total_bytes)? {
+            Some(bytes) => pairs.push((name, bytes)),
+            None => {}
         }
     }
 
@@ -661,10 +655,7 @@ pub fn save_clipboard() -> Result<ClipboardSnapshot, String> {
         vec![pairs]
     };
 
-    Ok(ClipboardSnapshot {
-        items,
-        change_count,
-    })
+    Ok(ClipboardSnapshot { items })
 }
 
 #[cfg(target_os = "windows")]
@@ -715,4 +706,20 @@ pub fn write_text(_text: &str) -> Result<i64, String> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn restore_clipboard(_snapshot: &ClipboardSnapshot) -> Result<(), String> {
     Err("clipboard snapshot is not yet implemented on this platform".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_clipboard_is_rejected_before_copying_or_overflowing() {
+        let mut bytes = 0;
+        reserve_snapshot_bytes(&mut bytes, MAX_SNAPSHOT_BYTES - 4).unwrap();
+        assert!(reserve_snapshot_bytes(&mut bytes, 5).is_err());
+        assert!(reserve_snapshot_bytes(&mut bytes, usize::MAX).is_err());
+        assert_eq!(bytes, MAX_SNAPSHOT_BYTES - 4);
+        reserve_snapshot_bytes(&mut bytes, 4).unwrap();
+        assert_eq!(bytes, MAX_SNAPSHOT_BYTES);
+    }
 }

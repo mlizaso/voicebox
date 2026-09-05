@@ -77,6 +77,7 @@ export function GeneralPage() {
 
   function onSubmit(data: ConnectionFormValues) {
     setServerUrl(data.serverUrl);
+    if (useServerStore.getState().serverUrl !== data.serverUrl) return;
     form.reset(data);
     toast({
       title: t('settings.general.serverUrl.updatedTitle'),
@@ -180,6 +181,7 @@ export function GeneralPage() {
                 }
                 onClick={() => {
                   setRemoteApiToken(tokenDraft);
+                  if (useServerStore.getState().remoteApiToken !== tokenDraft) return;
                   toast({
                     title: t('settings.general.remoteApiToken.updatedTitle'),
                     description: t('settings.general.remoteApiToken.updatedDescription'),
@@ -234,6 +236,7 @@ export function GeneralPage() {
                 checked={mode === 'remote'}
                 onCheckedChange={(checked: boolean) => {
                   setMode(checked ? 'remote' : 'local');
+                  if (useServerStore.getState().mode !== (checked ? 'remote' : 'local')) return;
                   toast({
                     title: t('settings.general.networkAccess.updatedTitle'),
                     description: checked

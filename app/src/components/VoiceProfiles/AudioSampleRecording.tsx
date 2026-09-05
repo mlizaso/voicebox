@@ -1,5 +1,5 @@
 import { Mic, Pause, Play, Square } from 'lucide-react';
-import { memo, useEffect, useState } from 'react';
+import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Visualizer } from 'react-sound-visualizer';
 import { Button } from '@/components/ui/button';
@@ -34,6 +34,7 @@ interface AudioSampleRecordingProps {
   isPlaying: boolean;
   isTranscribing?: boolean;
   showWaveform?: boolean;
+  audioStream?: MediaStream | null;
 }
 
 export function AudioSampleRecording({
@@ -48,35 +49,9 @@ export function AudioSampleRecording({
   isPlaying,
   isTranscribing = false,
   showWaveform = true,
+  audioStream = null,
 }: AudioSampleRecordingProps) {
   const { t } = useTranslation();
-  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
-
-  // Request microphone access when component mounts
-  useEffect(() => {
-    if (!showWaveform) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-
-    let stream: MediaStream | null = null;
-
-    navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
-      .then((s) => {
-        stream = s;
-        setAudioStream(s);
-      })
-      .catch((err) => {
-        console.warn('Could not access microphone for visualization:', err);
-      });
-
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => {
-          track.stop();
-        });
-      }
-    };
-  }, [showWaveform]);
 
   return (
     <FormItem>

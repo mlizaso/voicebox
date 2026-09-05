@@ -128,6 +128,8 @@ class PyTorchQwenLLMBackend:
             self.model = AutoModelForCausalLM.from_pretrained(
                 repo,
                 dtype=dtype,
+                # Do not let model metadata select a remote attention kernel.
+                attn_implementation="sdpa",
             )
             self.model.to(self.device)
             self.model.eval()

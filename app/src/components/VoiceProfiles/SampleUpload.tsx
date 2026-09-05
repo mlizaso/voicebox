@@ -68,6 +68,7 @@ export function SampleUpload({ profileId, open, onOpenChange }: SampleUploadProp
 
   const {
     isRecording,
+    audioStream,
     duration,
     error: recordingError,
     startRecording,
@@ -275,6 +276,7 @@ export function SampleUpload({ profileId, open, onOpenChange }: SampleUploadProp
                   name="file"
                   render={() => (
                     <AudioSampleRecording
+                      audioStream={audioStream}
                       file={selectedFile}
                       isRecording={isRecording}
                       duration={duration}

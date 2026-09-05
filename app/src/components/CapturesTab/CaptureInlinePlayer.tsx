@@ -2,6 +2,7 @@ import { Loader2, Pause, Play } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import { Button } from '@/components/ui/button';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { cn } from '@/lib/utils/cn';
 import { debug } from '@/lib/utils/debug';
 
@@ -57,7 +58,7 @@ export function CaptureInlinePlayer({
       dragToSeek: { debounceTime: 0 },
       mediaControls: false,
       backend: 'WebAudio',
-      fetchParams: { credentials: 'include' },
+      fetchParams: { credentials: 'omit' },
     });
 
     ws.on('ready', () => {
@@ -105,11 +106,27 @@ export function CaptureInlinePlayer({
     } catch (err) {
       debug.error('Failed to reset inline waveform before load', err);
     }
-    ws.load(audioUrl).catch((err) => {
-      debug.error('Inline waveform load failed', err);
-      setError(err instanceof Error ? err.message : String(err));
-      setIsLoading(false);
-    });
+    const request = new AbortController();
+    let sourceUrl = '';
+    void loadAudioSource(audioUrl, request.signal)
+      .then((src) => {
+        if (request.signal.aborted) {
+          releaseAudioSource(src);
+          return;
+        }
+        sourceUrl = src;
+        return ws.load(src);
+      })
+      .catch((err) => {
+        if (request.signal.aborted) return;
+        debug.error('Inline waveform load failed', err);
+        setError(err instanceof Error ? err.message : String(err));
+        setIsLoading(false);
+      });
+    return () => {
+      request.abort();
+      releaseAudioSource(sourceUrl);
+    };
   }, [audioUrl]);
 
   const handlePlayPause = () => {

@@ -60,7 +60,7 @@ The backend exposes:
 | Generation form | `app/src/components/Generation/GenerationForm.tsx` | TTS generation UI |
 | Floating gen box | `app/src/components/Generation/FloatingGenerateBox.tsx` | Compact generation UI |
 | Model manager | `app/src/components/ServerSettings/ModelManagement.tsx` | Model download/status/progress UI |
-| GPU acceleration | `app/src/components/ServerSettings/GpuAcceleration.tsx` | CUDA backend swap UI |
+| GPU acceleration | `app/src/components/ServerTab/GpuPage.tsx` | CUDA backend swap UI |
 | Gen form hook | `app/src/lib/hooks/useGenerationForm.ts` | Form validation + submission |
 | Language constants | `app/src/lib/constants/languages.ts` | Per-engine language maps |
 

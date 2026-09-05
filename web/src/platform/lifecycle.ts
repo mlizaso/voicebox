@@ -1,8 +1,19 @@
-import type { PlatformLifecycle, ServerCloseState, ServerLogEntry } from '@/platform/types';
+import type {
+  PlatformLifecycle,
+  ServerCloseState,
+  ServerConnection,
+  ServerLogEntry,
+} from '@/platform/types';
 import { getDefaultServerUrl } from '@/stores/serverStore';
 
 class WebLifecycle implements PlatformLifecycle {
   onServerReady?: () => void;
+
+  async setClientConnection(_connection: ServerConnection): Promise<void> {}
+
+  async getClientConnection(): Promise<ServerConnection | null> {
+    return null; // Web has no separate dictation window.
+  }
 
   async startServer(
     _remote = false,

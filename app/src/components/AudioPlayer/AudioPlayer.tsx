@@ -4,7 +4,9 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
+import { bufferResponseBounded } from '@/lib/api/boundedResponse';
 import { apiClient } from '@/lib/api/client';
 import { formatAudioDuration } from '@/lib/utils/audio';
 import { debug } from '@/lib/utils/debug';
@@ -71,9 +73,25 @@ export function AudioPlayer() {
   const previousAudioIdRef = useRef<string | null>(null);
   const hasInitializedRef = useRef(false);
   const isUsingNativePlaybackRef = useRef(false);
+  const nativeStartRef = useRef<AbortController | null>(null);
+  const [nativeStartPending, setNativeStartPending] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
+
+  useEffect(() => {
+    setNativeStartPending(false);
+    return () => {
+      if (nativeStartRef.current || isUsingNativePlaybackRef.current) {
+        nativeStartRef.current?.abort();
+        nativeStartRef.current = null;
+        isUsingNativePlaybackRef.current = false;
+        void platform.audio
+          .stopPlayback()
+          .catch((error) => debug.error('Failed to stop audio:', error));
+      }
+    };
+  }, [audioUrl, platform.audio]);
 
   // Create WaveSurfer once when the player becomes visible (audioUrl is set).
   // This instance is reused for all subsequent audio loads - never destroyed until unmount.
@@ -127,7 +145,7 @@ export function AudioPlayer() {
           dragToSeek: { debounceTime: 0 },
           mediaControls: false,
           backend: 'WebAudio',
-          fetchParams: { credentials: 'include' },
+          fetchParams: { credentials: 'omit' },
         });
 
         // Wire up event handlers (these persist for the lifetime of the instance)
@@ -182,7 +200,9 @@ export function AudioPlayer() {
         // Mute audio during drag-to-seek to prevent popping from the WebAudio
         // backend's hard stop/start cycle on each seek. Unmute with a short
         // fade-in when the drag ends.
-        const seekMedia = wavesurfer.getMediaElement() as any;
+        const seekMedia = wavesurfer.getMediaElement() as HTMLMediaElement & {
+          getGainNode?: () => GainNode;
+        };
         const seekGain: GainNode | null = seekMedia?.getGainNode?.() ?? null;
         if (seekGain) {
           const ctx = seekGain.context as AudioContext;
@@ -300,18 +320,33 @@ export function AudioPlayer() {
     setCurrentTime(0);
     setDuration(0);
 
-    wavesurfer
-      .load(audioUrl)
+    const request = new AbortController();
+    let sourceUrl = '';
+    void loadAudioSource(audioUrl, request.signal)
+      .then((src) => {
+        if (request.signal.aborted) {
+          releaseAudioSource(src);
+          return;
+        }
+        sourceUrl = src;
+        return wavesurfer.load(src);
+      })
       .then(() => {
+        if (request.signal.aborted) return;
         debug.log('Audio loaded into WaveSurfer');
         loadingRef.current = false;
       })
       .catch((err) => {
+        if (request.signal.aborted) return;
         debug.error('Failed to load audio:', err);
         loadingRef.current = false;
         setIsLoading(false);
         setError(`Failed to load audio: ${err instanceof Error ? err.message : String(err)}`);
       });
+    return () => {
+      request.abort();
+      releaseAudioSource(sourceUrl);
+    };
   }, [audioUrl, wsReady, setCurrentTime, setDuration]);
 
   // Sync play/pause state (only when user clicks play/pause button, not auto-sync)
@@ -397,6 +432,7 @@ export function AudioPlayer() {
   }, [audioUrl, duration]);
 
   const handlePlayPause = async () => {
+    if (nativeStartRef.current) return;
     // Standard WaveSurfer playback (works for both normal and native playback modes)
     // When using native playback, WaveSurfer is muted but still controls visualization
     if (!wavesurferRef.current) {
@@ -416,7 +452,7 @@ export function AudioPlayer() {
       if (isPlaying) {
         // Pause: stop native playback and pause WaveSurfer visualization
         try {
-          platform.audio.stopPlayback();
+          await platform.audio.stopPlayback();
           debug.log('Stopped native audio playback');
         } catch (error) {
           debug.error('Failed to stop native playback:', error);
@@ -426,10 +462,13 @@ export function AudioPlayer() {
       }
 
       // Play: trigger native playback
+      const request = new AbortController();
+      nativeStartRef.current = request;
+      setNativeStartPending(true);
       try {
         // Stop any existing native playback first
         try {
-          platform.audio.stopPlayback();
+          await platform.audio.stopPlayback();
         } catch (_error) {
           // Ignore errors when stopping (might not be playing)
           debug.log('No existing playback to stop');
@@ -443,11 +482,16 @@ export function AudioPlayer() {
 
         if (deviceIds.length > 0) {
           // Fetch audio data
-          const response = await authenticatedFetch(audioUrl);
-          const audioData = new Uint8Array(await response.arrayBuffer());
+          request.signal.throwIfAborted();
+          const response = await authenticatedFetch(audioUrl, { signal: request.signal });
+          if (!response.ok) throw new Error(`Could not load audio (${response.status})`);
+          const bounded = await bufferResponseBounded(response, 100 * 1024 * 1024);
+          const audioData = new Uint8Array(await bounded.arrayBuffer());
+          request.signal.throwIfAborted();
 
           // Play via native audio
           await platform.audio.playToDevices(audioData, deviceIds);
+          request.signal.throwIfAborted();
 
           // Mark that we're using native playback
           isUsingNativePlaybackRef.current = true;
@@ -466,9 +510,16 @@ export function AudioPlayer() {
           return;
         }
       } catch (error) {
-        debug.error('Native playback failed, falling back to WaveSurfer:', error);
-        // Fall through to WaveSurfer playback
+        if (request.signal.aborted) return;
+        debug.error('Native playback failed:', error);
+        setError(`Playback error: ${error instanceof Error ? error.message : String(error)}`);
         isUsingNativePlaybackRef.current = false;
+        return;
+      } finally {
+        if (nativeStartRef.current === request) {
+          nativeStartRef.current = null;
+          setNativeStartPending(false);
+        }
       }
     }
 
@@ -502,12 +553,11 @@ export function AudioPlayer() {
 
   const handleClose = () => {
     // Stop any native playback
-    if (isUsingNativePlaybackRef.current && platform.metadata.isTauri) {
-      try {
-        platform.audio.stopPlayback();
-      } catch (error) {
-        debug.error('Failed to stop native playback:', error);
-      }
+    if ((isUsingNativePlaybackRef.current || nativeStartRef.current) && platform.metadata.isTauri) {
+      nativeStartRef.current?.abort();
+      void platform.audio
+        .stopPlayback()
+        .catch((error) => debug.error('Failed to stop native playback:', error));
     }
     // Stop WaveSurfer
     if (wavesurferRef.current) {
@@ -532,7 +582,7 @@ export function AudioPlayer() {
             variant="ghost"
             size="icon"
             onClick={handlePlayPause}
-            disabled={isLoading || duration === 0}
+            disabled={isLoading || nativeStartPending || duration === 0}
             className={`shrink-0 -mt-2 ${isPlaying ? 'bg-accent text-accent-foreground' : ''}`}
             title={duration === 0 && !isLoading ? 'Audio not loaded' : ''}
             aria-label={
@@ -582,11 +632,7 @@ export function AudioPlayer() {
           </Button>
 
           {/* Volume Control */}
-          <div
-            className="flex items-center gap-2 shrink-0 w-[120px]"
-            role="group"
-            aria-label="Volume"
-          >
+          <fieldset className="flex items-center gap-2 shrink-0 w-[120px]" aria-label="Volume">
             <Button
               variant="ghost"
               size="icon"
@@ -608,7 +654,7 @@ export function AudioPlayer() {
               aria-labelledby={volumeLabelId}
               aria-valuetext={`${Math.round(volume * 100)}%`}
             />
-          </div>
+          </fieldset>
 
           {/* Close Button */}
           <Button

@@ -355,39 +355,6 @@ cd ../..
 bun run tauri build
 ```
 
-### OpenAPI Client Generation Fails
-
-**Symptoms:**
-- `./scripts/generate-api.sh` fails
-- "Failed to fetch schema" error
-
-**Solutions:**
-
-<Steps>
-  <Step title="Ensure Backend is Running">
-    ```bash
-    curl http://localhost:17493/openapi.json
-    ```
-
-    Should return JSON. If not, start the backend.
-  </Step>
-
-  <Step title="Check Port">
-    Ensure nothing else is using port 17493
-  </Step>
-
-  <Step title="Regenerate Manually">
-    ```bash
-    cd backend
-    source venv/bin/activate
-    uvicorn main:app --reload --port 17493
-
-    # In another terminal
-    ./scripts/generate-api.sh
-    ```
-  </Step>
-</Steps>
-
 ## Database Issues
 
 ### "Database is locked" Error

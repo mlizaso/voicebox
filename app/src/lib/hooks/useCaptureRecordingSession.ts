@@ -5,6 +5,8 @@ import { apiClient } from '@/lib/api/client';
 import type { CaptureListResponse, CaptureResponse, CaptureSource } from '@/lib/api/types';
 import { useAudioRecording } from '@/lib/hooks/useAudioRecording';
 import { usePlatform } from '@/platform/PlatformContext';
+import type { FocusTarget } from '@/platform/types';
+import { useServerStore } from '@/stores/serverStore';
 
 const REST_FADE_MS = 900;
 // How long the green "Done" pill stays visible after refine (or transcribe,
@@ -40,7 +42,13 @@ export interface UseCaptureRecordingSessionOptions {
    * lands after the user flips the toggle still uses the value the capture
    * was created under.
    */
-  onFinalText?: (text: string, capture: CaptureResponse, allowAutoPaste: boolean) => void;
+  getFocusTarget?: () => FocusTarget | null;
+  onFinalText?: (
+    text: string,
+    capture: CaptureResponse,
+    allowAutoPaste: boolean,
+    focus: FocusTarget | null,
+  ) => void;
 }
 
 export interface UseCaptureRecordingSessionResult {
@@ -91,11 +99,6 @@ export function useCaptureRecordingSession(
 
   const onFinalTextRef = useRef(options.onFinalText);
   onFinalTextRef.current = options.onFinalText;
-
-  // Snapshot of ``allow_auto_paste`` from the capture-create response —
-  // held so the refine onSuccess (which only sees the plain CaptureResponse)
-  // can still pass the original setting through to onFinalText.
-  const allowAutoPasteRef = useRef<boolean>(true);
 
   const clearRestTimer = useCallback(() => {
     if (restTimerRef.current !== null) {
@@ -156,14 +159,25 @@ export function useCaptureRecordingSession(
 
   const refineMutation = useMutation({
     // Empty body — backend resolves flags and model from capture_settings.
-    mutationFn: async (captureId: string) => apiClient.refineCapture(captureId, {}),
-    onSuccess: (data, captureId) => {
+    mutationFn: async ({
+      captureId,
+    }: {
+      captureId: string;
+      focus: FocusTarget | null;
+      allowAutoPaste: boolean;
+    }) => apiClient.refineCapture(captureId, {}),
+    onSuccess: (data, { captureId, focus, allowAutoPaste }) => {
       queryClient.invalidateQueries({ queryKey: ['captures'] });
-      platform.events.emit('capture:updated', { id: captureId }).catch(() => {});
+      platform.events
+        .emit('capture:updated', {
+          id: captureId,
+          connectionId: useServerStore.getState().connectionId,
+        })
+        .catch(() => {});
       if (pillStateRef.current === 'refining') scheduleHidePill();
       const finalText = data.transcript_refined ?? data.transcript_raw;
       if (finalText) {
-        onFinalTextRef.current?.(finalText, data, allowAutoPasteRef.current);
+        onFinalTextRef.current?.(finalText, data, allowAutoPaste, focus);
       }
     },
     onError: (err: Error) => {
@@ -172,25 +186,44 @@ export function useCaptureRecordingSession(
   });
 
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, source }: { file: File; source: CaptureSource }) =>
-      apiClient.createCapture(file, { source }),
-    onSuccess: (capture) => {
+    mutationFn: async ({
+      file,
+      source,
+    }: {
+      file: File;
+      source: CaptureSource;
+      focus?: FocusTarget | null;
+    }) => apiClient.createCapture(file, { source }),
+    onSuccess: (capture, { focus = null }) => {
       queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
         if (!prev) return prev;
         if (prev.items.some((c) => c.id === capture.id)) return prev;
         return { ...prev, items: [capture, ...prev.items], total: prev.total + 1 };
       });
       queryClient.invalidateQueries({ queryKey: ['captures'] });
-      platform.events.emit('capture:created', { capture }).catch(() => {});
+      platform.events
+        .emit('capture:created', {
+          capture,
+          connectionId: useServerStore.getState().connectionId,
+        })
+        .catch(() => {});
       onCaptureCreatedRef.current?.(capture);
-      allowAutoPasteRef.current = capture.allow_auto_paste;
       if (capture.auto_refine) {
         setPillState('refining');
-        refineMutation.mutate(capture.id);
+        refineMutation.mutate({
+          captureId: capture.id,
+          focus,
+          allowAutoPaste: capture.allow_auto_paste,
+        });
       } else {
         if (pillStateRef.current === 'transcribing') scheduleHidePill();
         if (capture.transcript_raw) {
-          onFinalTextRef.current?.(capture.transcript_raw, capture, capture.allow_auto_paste);
+          onFinalTextRef.current?.(
+            capture.transcript_raw,
+            capture,
+            capture.allow_auto_paste,
+            focus,
+          );
         }
       }
     },
@@ -211,31 +244,40 @@ export function useCaptureRecordingSession(
   const {
     isRecording,
     duration,
-    startRecording: beginAudioRecording,
-    stopRecording,
+    startRecordingWithCallback: beginAudioRecording,
+    stopRecording: stopAudioRecording,
     error: recordError,
-  } = useAudioRecording({
-    onRecordingComplete: (blob, recordedDuration) => {
-      // Trigger-happy tap — MediaRecorder hasn't emitted a usable chunk yet
-      // so the blob is empty or unparseable. Surface it as a transient pill
-      // so the user sees their recording was recognised and canceled.
-      if (!blob.size || (recordedDuration ?? 0) < MIN_RECORDING_DURATION_S) {
-        showError(SHORT_RECORDING_MESSAGE, BRIEF_NOTICE_MS);
-        return;
-      }
-      setFrozenElapsedMs(Math.round((recordedDuration ?? 0) * 1000));
-      setPillState('transcribing');
-      const extension = blob.type.includes('wav')
-        ? 'wav'
-        : blob.type.includes('webm')
-          ? 'webm'
-          : 'bin';
-      const file = new File([blob], `dictation-${Date.now()}.${extension}`, {
-        type: blob.type,
-      });
-      uploadMutation.mutate({ file, source: 'dictation' });
-    },
-  });
+  } = useAudioRecording();
+
+  const handleRecordingComplete = (
+    blob: Blob,
+    recordedDuration: number | undefined,
+    focus: FocusTarget | null,
+    connectionId: string,
+  ) => {
+    if (connectionId !== useServerStore.getState().connectionId) {
+      showError('Connection changed. This recording was canceled; record again.');
+      return;
+    }
+    // Trigger-happy tap — MediaRecorder hasn't emitted a usable chunk yet
+    // so the blob is empty or unparseable. Surface it as a transient pill
+    // so the user sees their recording was recognised and canceled.
+    if (!blob.size || (recordedDuration ?? 0) < MIN_RECORDING_DURATION_S) {
+      showError(SHORT_RECORDING_MESSAGE, BRIEF_NOTICE_MS);
+      return;
+    }
+    setFrozenElapsedMs(Math.round((recordedDuration ?? 0) * 1000));
+    setPillState('transcribing');
+    const extension = blob.type.includes('wav')
+      ? 'wav'
+      : blob.type.includes('webm')
+        ? 'webm'
+        : 'bin';
+    const file = new File([blob], `dictation-${Date.now()}.${extension}`, {
+      type: blob.type,
+    });
+    uploadMutation.mutate({ file, source: 'dictation', focus });
+  };
 
   useEffect(() => {
     if (recordError) {
@@ -243,21 +285,30 @@ export function useCaptureRecordingSession(
     }
   }, [recordError, showError]);
 
-  const startRecording = useCallback(() => {
+  const startRecording = () => {
     if (isRecording) return;
     clearRestTimer();
     setFrozenElapsedMs(0);
     setPillState('recording');
-    beginAudioRecording();
-  }, [isRecording, beginAudioRecording, clearRestTimer]);
+    const focus = options.getFocusTarget?.() ?? null;
+    const connectionId = useServerStore.getState().connectionId;
+    beginAudioRecording((blob, duration) =>
+      handleRecordingComplete(blob, duration, focus, connectionId),
+    );
+  };
 
-  const toggleRecording = useCallback(() => {
+  const stopRecording = () => {
+    stopAudioRecording();
+    if (!isRecording && pillStateRef.current === 'recording') setPillState('hidden');
+  };
+
+  const toggleRecording = () => {
     if (isRecording) {
       stopRecording();
       return;
     }
     startRecording();
-  }, [isRecording, startRecording, stopRecording]);
+  };
 
   const uploadFile = useCallback(
     (file: File, source: CaptureSource) => {
@@ -268,7 +319,7 @@ export function useCaptureRecordingSession(
 
   const refine = useCallback(
     (captureId: string) => {
-      refineMutation.mutate(captureId);
+      refineMutation.mutate({ captureId, focus: null, allowAutoPaste: false });
     },
     [refineMutation],
   );

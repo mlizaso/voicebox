@@ -23,6 +23,9 @@ export function useSystemAudioCapture({
   const startTimeRef = useRef<number | null>(null);
   const stopRecordingRef = useRef<(() => Promise<void>) | null>(null);
   const isRecordingRef = useRef(false);
+  const startingRef = useRef(false);
+  const epochRef = useRef(0);
+  const cancelledRef = useRef(false);
 
   // Check if system audio capture is supported
   useEffect(() => {
@@ -47,6 +50,7 @@ export function useSystemAudioCapture({
   }, [platform]);
 
   const startRecording = useCallback(async () => {
+    if (startingRef.current || isRecordingRef.current) return;
     if (!platform.metadata.isTauri) {
       const errorMsg = 'System audio capture is only available in the desktop app.';
       setError(errorMsg);
@@ -59,12 +63,19 @@ export function useSystemAudioCapture({
       return;
     }
 
+    startingRef.current = true;
+    cancelledRef.current = false;
+    const epoch = epochRef.current;
     try {
       setError(null);
       setDuration(0);
 
       // Start native capture
       await platform.audio.startSystemAudioCapture(maxDurationSeconds);
+      if (epoch !== epochRef.current) {
+        await platform.audio.stopSystemAudioCapture();
+        return;
+      }
 
       setIsRecording(true);
       isRecordingRef.current = true;
@@ -89,14 +100,17 @@ export function useSystemAudioCapture({
           : 'Failed to start system audio capture. Please check permissions.';
       setError(errorMessage);
       setIsRecording(false);
+    } finally {
+      startingRef.current = false;
     }
   }, [maxDurationSeconds, isSupported, platform]);
 
   const stopRecording = useCallback(async () => {
-    if (!isRecording || !platform.metadata.isTauri) {
+    if (!isRecordingRef.current || !platform.metadata.isTauri) {
       return;
     }
 
+    const cancelled = cancelledRef.current;
     try {
       setIsRecording(false);
       isRecordingRef.current = false;
@@ -113,13 +127,13 @@ export function useSystemAudioCapture({
       const recordedDuration = startTimeRef.current
         ? (Date.now() - startTimeRef.current) / 1000
         : undefined;
-      onRecordingComplete?.(blob, recordedDuration);
+      if (!cancelled) onRecordingComplete?.(blob, recordedDuration);
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to stop system audio capture.';
       setError(errorMessage);
     }
-  }, [isRecording, onRecordingComplete, platform]);
+  }, [onRecordingComplete, platform]);
 
   // Store stopRecording in ref for use in timer
   useEffect(() => {
@@ -127,6 +141,8 @@ export function useSystemAudioCapture({
   }, [stopRecording]);
 
   const cancelRecording = useCallback(async () => {
+    epochRef.current += 1;
+    cancelledRef.current = true;
     if (isRecordingRef.current) {
       await stopRecording();
     }
@@ -144,6 +160,7 @@ export function useSystemAudioCapture({
   // Cleanup on unmount only
   useEffect(() => {
     return () => {
+      epochRef.current += 1;
       if (timerRef.current !== null) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -156,7 +173,6 @@ export function useSystemAudioCapture({
         });
       }
     };
-    // biome-ignore lint/correctness/useExhaustiveDependencies: Only run on unmount
   }, [platform]);
 
   return {

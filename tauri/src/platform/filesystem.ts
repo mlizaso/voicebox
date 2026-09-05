@@ -111,8 +111,8 @@ export const tauriFilesystem: PlatformFilesystem = {
   },
 
   async openPath(path: string) {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(path);
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_directory', { path });
   },
 
   async pickDirectory(title: string) {

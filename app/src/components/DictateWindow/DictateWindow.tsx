@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CapturePill } from '@/components/CapturePill/CapturePill';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import { useCaptureRecordingSession } from '@/lib/hooks/useCaptureRecordingSession';
 import { usePlatform } from '@/platform/PlatformContext';
-import type { FocusSnapshot } from '@/platform/types';
+import type { FocusTarget, ServerConnection } from '@/platform/types';
+import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 
 /**
  * Floating dictate surface shown in a separate transparent Tauri window.
@@ -40,15 +42,12 @@ export function DictateWindow() {
   // Rust on the ``dictate:start`` payload. Held in a ref so it survives
   // the 1–2 s transcribe + refine window — the paste only fires once the
   // final text comes back.
-  const focusRef = useRef<FocusSnapshot | null>(null);
+  const focusRef = useRef<FocusTarget | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const session = useCaptureRecordingSession({
-    onFinalText: async (text, _capture, allowAutoPaste) => {
-      const focus = focusRef.current;
-      // Consume-once: a second chord before this fires would overwrite
-      // focusRef, but nulling it here guards against the late-arriving
-      // refine-result firing a paste after the user has moved on.
-      focusRef.current = null;
+    getFocusTarget: () => focusRef.current,
+    onFinalText: async (text, _capture, allowAutoPaste, focus) => {
       if (!allowAutoPaste) return;
       if (!focus || !text.trim()) return;
       try {
@@ -72,19 +71,42 @@ export function DictateWindow() {
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
+  // Keep an in-flight recording/upload/refinement on its original identity.
+  // Credentials come from native memory before a new cycle, never localStorage.
+  const adoptConnection = useCallback((connection: ServerConnection | null) => {
+    if (!connection) throw new Error('Open the main window to connect before dictating.');
+    const store = useServerStore.getState();
+    if (connection.connectionId === store.connectionId) return;
+    if (sessionRef.current.pillState === 'recording' || !store.setConnection(connection)) {
+      throw new Error('Wait for the previous recording to finish before changing connections.');
+    }
+  }, []);
+
   useEffect(() => {
-    const unsubscribeStart = platform.events.subscribe('dictate:start', (payload) => {
-      focusRef.current = payload?.focus ?? null;
-      sessionRef.current.startRecording();
+    let epoch = 0;
+    const unsubscribeStart = platform.events.subscribe('dictate:start', async (payload) => {
+      const request = ++epoch;
+      try {
+        const connection = await platform.lifecycle.getClientConnection();
+        if (request !== epoch) return;
+        adoptConnection(connection);
+        setConnectionError(null);
+        focusRef.current = payload?.focus ?? null;
+        sessionRef.current.startRecording();
+      } catch (error) {
+        if (request === epoch) setConnectionError(String(error));
+      }
     });
     const unsubscribeStop = platform.events.subscribe('dictate:stop', () => {
-      if (sessionRef.current.isRecording) sessionRef.current.stopRecording();
+      epoch += 1;
+      sessionRef.current.stopRecording();
     });
     return () => {
+      epoch += 1;
       unsubscribeStart();
       unsubscribeStop();
     };
-  }, [platform.events]);
+  }, [adoptConnection, platform.events, platform.lifecycle]);
 
   // --- Agent-speak cycle ---------------------------------------------------
 
@@ -104,6 +126,7 @@ export function DictateWindow() {
   const statusSourceRef = useRef<EventSource | null>(null);
   const statusTimeoutRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRequestRef = useRef<AbortController | null>(null);
 
   const clearStatusTimeout = useCallback(() => {
     if (statusTimeoutRef.current !== null) {
@@ -120,7 +143,10 @@ export function DictateWindow() {
       statusSourceRef.current?.close();
       statusSourceRef.current = null;
       clearStatusTimeout();
+      audioRequestRef.current?.abort();
+      audioRequestRef.current = null;
       if (audioRef.current) {
+        releaseAudioSource(audioRef.current.src);
         audioRef.current.pause();
         audioRef.current.src = '';
         audioRef.current = null;
@@ -133,8 +159,9 @@ export function DictateWindow() {
   const startSpeakPlayback = useCallback(
     (generationId: string) => {
       const audio = new Audio();
-      audio.crossOrigin = 'use-credentials';
-      audio.src = apiClient.getAudioUrl(generationId);
+      audio.crossOrigin = 'anonymous';
+      const request = new AbortController();
+      audioRequestRef.current = request;
       audio.onended = () => dismissSpeak(generationId);
       audio.onerror = () => dismissSpeak(generationId);
       // The pill window stays hidden through the ~1 s generation wait so the
@@ -149,72 +176,98 @@ export function DictateWindow() {
         setSpeakElapsed(0);
       };
       audioRef.current = audio;
-      audio.play().catch((err) => {
-        console.warn('[dictate] audio.play failed:', err);
-        dismissSpeak(generationId);
-      });
+      void loadAudioSource(apiClient.getAudioUrl(generationId), request.signal)
+        .then((src) => {
+          if (request.signal.aborted || audioRef.current !== audio) {
+            releaseAudioSource(src);
+            return;
+          }
+          audio.src = src;
+          return audio.play();
+        })
+        .catch((err) => {
+          if (request.signal.aborted) return;
+          console.warn('[dictate] audio.play failed:', err);
+          dismissSpeak(generationId);
+        });
     },
     [dismissSpeak, platform.events],
   );
 
   useEffect(() => {
+    let epoch = 0;
     // Rust emits the SSE payload as a JSON *string* (not a parsed object);
     // the payload shape for speak-start is
     // {generation_id, profile_name, source, client_id}.
-    const unsubscribeSpeakStart = platform.events.subscribe('dictate:speak-start', (payload) => {
-      let parsed: { generation_id?: string } = {};
-      try {
-        parsed = typeof payload === 'string' ? JSON.parse(payload) : {};
-      } catch {
-        return;
-      }
-      const id = parsed.generation_id;
-      if (!id) return;
-
-      // Tear down any previous cycle — last speak wins.
-      dismissSpeak();
-
-      setSpeaking({ generationId: id, startedAt: null });
-      setSpeakElapsed(0);
-
-      // Subscribe to this one generation's status. When it completes, the
-      // `/audio/{id}` endpoint will serve the WAV we need to play.
-      const source = authenticatedEventSource(apiClient.getGenerationStatusUrl(id));
-      statusSourceRef.current = source;
-      // Hard cap on how long the pill can sit in the 'speaking' state
-      // without ever hearing back from the backend. Covers the case where
-      // the gen row is deleted mid-flight (SSE 404s and EventSource silently
-      // retries) or the backend goes away while a request is in flight.
-      // Clears as soon as a real status event lands.
-      clearStatusTimeout();
-      statusTimeoutRef.current = window.setTimeout(() => {
-        statusTimeoutRef.current = null;
-        if (speakingRef.current?.generationId === id && !audioRef.current) {
-          dismissSpeak(id);
-        }
-      }, 60_000);
-      source.onmessage = (msg) => {
+    const unsubscribeSpeakStart = platform.events.subscribe(
+      'dictate:speak-start',
+      async (payload) => {
+        let parsed: { generation_id?: string } = {};
         try {
-          const data = JSON.parse(msg.data) as { status?: string };
-          if (data.status === 'completed') {
-            clearStatusTimeout();
-            source.close();
-            if (statusSourceRef.current === source) statusSourceRef.current = null;
-            startSpeakPlayback(id);
-          } else if (data.status === 'failed' || data.status === 'not_found') {
-            clearStatusTimeout();
-            source.close();
+          parsed = typeof payload === 'string' ? JSON.parse(payload) : {};
+        } catch {
+          return;
+        }
+        const id = parsed.generation_id;
+        if (!id) return;
+
+        // Tear down any previous cycle — last speak wins.
+        dismissSpeak();
+
+        const request = ++epoch;
+        try {
+          const connection = await platform.lifecycle.getClientConnection();
+          if (request !== epoch) return;
+          // The native speak monitor belongs to the local managed sidecar.
+          if (!connection || !isLoopbackVoiceboxServerUrl(connection.serverUrl)) return;
+          adoptConnection(connection);
+        } catch (error) {
+          if (request === epoch) setConnectionError(String(error));
+          return;
+        }
+
+        setSpeaking({ generationId: id, startedAt: null });
+        setSpeakElapsed(0);
+
+        // Subscribe to this one generation's status. When it completes, the
+        // `/audio/{id}` endpoint will serve the WAV we need to play.
+        const source = authenticatedEventSource(apiClient.getGenerationStatusUrl(id));
+        statusSourceRef.current = source;
+        // Hard cap on how long the pill can sit in the 'speaking' state
+        // without ever hearing back from the backend. Covers the case where
+        // the gen row is deleted mid-flight (SSE 404s and EventSource silently
+        // retries) or the backend goes away while a request is in flight.
+        // Clears as soon as a real status event lands.
+        clearStatusTimeout();
+        statusTimeoutRef.current = window.setTimeout(() => {
+          statusTimeoutRef.current = null;
+          if (speakingRef.current?.generationId === id && !audioRef.current) {
             dismissSpeak(id);
           }
-        } catch {
-          // heartbeats / junk — ignore.
-        }
-      };
-      source.onerror = () => {
-        // EventSource auto-reconnects on transient drops; the timeout above
-        // is the backstop for the case where it never recovers.
-      };
-    });
+        }, 60_000);
+        source.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data) as { status?: string };
+            if (data.status === 'completed') {
+              clearStatusTimeout();
+              source.close();
+              if (statusSourceRef.current === source) statusSourceRef.current = null;
+              startSpeakPlayback(id);
+            } else if (data.status === 'failed' || data.status === 'not_found') {
+              clearStatusTimeout();
+              source.close();
+              dismissSpeak(id);
+            }
+          } catch {
+            // heartbeats / junk — ignore.
+          }
+        };
+        source.onerror = () => {
+          // EventSource auto-reconnects on transient drops; the timeout above
+          // is the backstop for the case where it never recovers.
+        };
+      },
+    );
 
     // Speak-end from the backend is advisory: the authoritative dismiss is
     // `audio.ended`. But if generation failed or nothing ever triggered
@@ -243,11 +296,19 @@ export function DictateWindow() {
     });
 
     return () => {
+      epoch += 1;
       unsubscribeSpeakStart();
       unsubscribeSpeakEnd();
       dismissSpeak();
     };
-  }, [clearStatusTimeout, dismissSpeak, platform.events, startSpeakPlayback]);
+  }, [
+    adoptConnection,
+    clearStatusTimeout,
+    dismissSpeak,
+    platform.events,
+    platform.lifecycle,
+    startSpeakPlayback,
+  ]);
 
   // Advance the pill's elapsed-time label while audio is playing. Paused
   // during the pre-playback generation window (startedAt is null) so the
@@ -264,7 +325,7 @@ export function DictateWindow() {
   // --- Effective pill state -----------------------------------------------
 
   const isSpeaking = Boolean(speaking);
-  const effectiveState = isSpeaking ? 'speaking' : session.pillState;
+  const effectiveState = connectionError ? 'error' : isSpeaking ? 'speaking' : session.pillState;
   const effectiveElapsed = isSpeaking ? speakElapsed : session.pillElapsedMs;
 
   // When the pill cycle ends (no capture AND no speak), tell Rust to tuck
@@ -286,8 +347,11 @@ export function DictateWindow() {
         <CapturePill
           state={effectiveState}
           elapsedMs={effectiveElapsed}
-          errorMessage={session.errorMessage}
-          onDismiss={session.dismissError}
+          errorMessage={connectionError ?? session.errorMessage}
+          onDismiss={() => {
+            setConnectionError(null);
+            session.dismissError();
+          }}
           onStop={session.isRecording ? session.stopRecording : undefined}
         />
       ) : null}

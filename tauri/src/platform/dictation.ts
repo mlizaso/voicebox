@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { FocusSnapshot, HotkeyBindings, PlatformDictation } from '@/platform/types';
+import type { FocusTarget, HotkeyBindings, PlatformDictation } from '@/platform/types';
 
 export const tauriDictation: PlatformDictation = {
   setHotkeysEnabled(enabled: boolean, bindings: HotkeyBindings) {
@@ -28,7 +28,7 @@ export const tauriDictation: PlatformDictation = {
     return invoke<void>('open_input_monitoring_settings');
   },
 
-  pasteFinalText(text: string, focus: FocusSnapshot) {
+  pasteFinalText(text: string, focus: FocusTarget) {
     return invoke<boolean>('paste_final_text', { text, focus });
   },
 };

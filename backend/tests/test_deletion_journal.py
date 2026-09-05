@@ -1,6 +1,7 @@
 """Crash recovery and shared-ownership tests for managed deletion staging."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -18,6 +19,34 @@ from backend.database import (
     VoiceProfile,
 )
 from backend.services import captures, deletion_journal, history, profiles
+
+
+@pytest.mark.parametrize("field", ["original", "staged"])
+@pytest.mark.parametrize("value", [None, 42, [], {}])
+@pytest.mark.parametrize("secure", [True, False])
+def test_malformed_path_does_not_block_other_recovery(tmp_path, monkeypatch, field, value, secure):
+    if secure and not deletion_journal.secure_dir_fd_supported():
+        pytest.skip("Descriptor-relative file operations are unavailable")
+    data_dir, db = _database(tmp_path, monkeypatch)
+    audio = data_dir / "generations" / "owned.wav"
+    audio.write_bytes(b"owned audio")
+    _add_generation(db, "generation", "generations/owned.wav")
+    history._stage_managed_generation_audio("generations/owned.wav")
+    journal_dir = config.get_deletion_journal_dir()
+    payload = json.loads(next(journal_dir.glob("*.json")).read_text())
+    payload.update(operation_id="malformed", **{field: value})
+    malformed = journal_dir / "malformed.json"
+    malformed.write_text(json.dumps(payload))
+    monkeypatch.setattr(deletion_journal, "secure_dir_fd_supported", lambda: secure)
+
+    report = deletion_journal.recover_interrupted_deletions(db)
+
+    assert report.malformed == 1
+    assert report.restored == 1
+    assert report.unresolved == 0
+    assert audio.read_bytes() == b"owned audio"
+    assert list(journal_dir.iterdir()) == [malformed]
+    db.close()
 
 
 def _database(tmp_path, monkeypatch):

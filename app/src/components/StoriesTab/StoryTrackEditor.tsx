@@ -26,6 +26,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Slider } from '@/components/ui/slider';
 import { useToast } from '@/components/ui/use-toast';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { apiClient } from '@/lib/api/client';
 import type { StoryItemDetail } from '@/lib/api/types';
 import {
@@ -91,7 +92,7 @@ function ClipWaveform({
     const mediaElement = document.createElement('audio');
     mediaElement.muted = true;
     mediaElement.preload = 'metadata';
-    mediaElement.crossOrigin = 'use-credentials';
+    mediaElement.crossOrigin = 'anonymous';
 
     const wavesurfer = WaveSurfer.create({
       container: waveformRef.current,
@@ -112,11 +113,24 @@ function ClipWaveform({
     const audioUrl = versionId
       ? apiClient.getVersionAudioUrl(versionId)
       : apiClient.getAudioUrl(generationId);
-    wavesurfer.load(audioUrl).catch(() => {
-      // Ignore load errors
-    });
+    const request = new AbortController();
+    let sourceUrl = '';
+    void loadAudioSource(audioUrl, request.signal)
+      .then((src) => {
+        if (request.signal.aborted) {
+          releaseAudioSource(src);
+          return;
+        }
+        sourceUrl = src;
+        return wavesurfer.load(src);
+      })
+      .catch(() => {
+        // Ignore load errors
+      });
 
     return () => {
+      request.abort();
+      releaseAudioSource(sourceUrl);
       wavesurfer.destroy();
       wavesurferRef.current = null;
     };
@@ -1002,6 +1016,24 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
     [timelineScrollLeft, pixelsPerSecond],
   );
 
+  const handleZoomKeyDown = (event: React.KeyboardEvent) => {
+    const direction = ['ArrowRight', 'ArrowUp'].includes(event.key)
+      ? 1
+      : ['ArrowLeft', 'ArrowDown'].includes(event.key)
+        ? -1
+        : 0;
+    if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const next =
+      event.key === 'Home'
+        ? minPps
+        : event.key === 'End'
+          ? maxPps
+          : pixelsPerSecond * (direction > 0 ? 1.1 : 1 / 1.1);
+    setPixelsPerSecond(Math.max(minPps, Math.min(maxPps, next)));
+  };
+
   // After a zoom drag updates pixelsPerSecond, snap scrollLeft so the anchored
   // edge (left or right of the visible window) stays at the same time.
   useEffect(() => {
@@ -1492,9 +1524,10 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
               style={{ width: `${thumbWidth}px`, left: `${thumbLeft}px` }}
             >
               {/* Left zoom handle */}
-              {/* biome-ignore lint/a11y/noStaticElementInteractions: mouse-driven edge handle */}
               <div
                 role="slider"
+                tabIndex={0}
+                onKeyDown={handleZoomKeyDown}
                 aria-label="Zoom from left edge"
                 aria-valuenow={Math.round(pixelsPerSecond)}
                 aria-valuemin={Math.round(minPps)}
@@ -1512,9 +1545,10 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
                 onMouseDown={canScrollHorizontally ? handleScrollbarMouseDown('pan') : undefined}
               />
               {/* Right zoom handle */}
-              {/* biome-ignore lint/a11y/noStaticElementInteractions: mouse-driven edge handle */}
               <div
                 role="slider"
+                tabIndex={0}
+                onKeyDown={handleZoomKeyDown}
                 aria-label="Zoom from right edge"
                 aria-valuenow={Math.round(pixelsPerSecond)}
                 aria-valuemin={Math.round(minPps)}

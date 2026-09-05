@@ -1,4 +1,4 @@
-use crate::audio_capture::AudioCaptureState;
+use crate::audio_capture::{AudioCaptureSession, MAX_CAPTURE_SAMPLES};
 use base64::{engine::general_purpose, Engine as _};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -68,7 +68,7 @@ fn find_monitor_source_via_pactl() -> Option<String> {
 
 /// Select the capture device: prefer an exact match against the monitor
 /// source name reported by `pactl`, then fall back to any device whose name
-/// contains "monitor", then the host's default input device.
+/// contains "monitor". A microphone is never a system-audio fallback.
 fn select_capture_device(host: &cpal::Host, monitor_source: Option<&str>) -> Option<cpal::Device> {
     let devices: Vec<cpal::Device> = host.input_devices().ok()?.collect();
 
@@ -91,12 +91,15 @@ fn select_capture_device(host: &cpal::Host, monitor_source: Option<&str>) -> Opt
             .unwrap_or(false)
     }) {
         let name = devices[pos].name().unwrap_or_default();
-        eprintln!("Linux audio capture: Found monitor device by name: {}", name);
+        eprintln!(
+            "Linux audio capture: Found monitor device by name: {}",
+            name
+        );
         return devices.into_iter().nth(pos);
     }
 
-    eprintln!("Linux audio capture: No monitor device found, falling back to default input");
-    host.default_input_device()
+    eprintln!("Linux audio capture: No system-audio monitor device found");
+    None
 }
 
 /// Start capturing system audio on Linux using PulseAudio monitor sources.
@@ -107,12 +110,9 @@ fn select_capture_device(host: &cpal::Host, monitor_source: Option<&str>) -> Opt
 /// is not thread-safe and would affect every thread in the process. If `pactl`
 /// is unavailable, we fall back to searching cpal device names for "monitor".
 pub async fn start_capture(
-    state: &AudioCaptureState,
+    state: &AudioCaptureSession,
     max_duration_secs: u32,
 ) -> Result<(), String> {
-    // Reset previous samples
-    state.reset();
-
     let samples = state.samples.clone();
     let sample_rate_arc = state.sample_rate.clone();
     let channels_arc = state.channels.clone();
@@ -125,7 +125,7 @@ pub async fn start_capture(
 
     // Create tokio channel and spawn a task to bridge it to the AtomicBool
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-    *stop_tx.lock().unwrap() = Some(tx);
+    *stop_tx.lock().unwrap() = Some(tx.clone());
 
     tokio::spawn(async move {
         rx.recv().await;
@@ -133,7 +133,10 @@ pub async fn start_capture(
     });
 
     // Spawn capture on a dedicated thread
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let finished = state.finished.clone();
     thread::spawn(move || {
+        let _finished = scopeguard::guard(finished, |done| done.store(true, Ordering::Release));
         let host = cpal::default_host();
         let monitor_source = find_monitor_source_via_pactl();
 
@@ -203,7 +206,8 @@ pub async fn start_capture(
                             return;
                         }
                         let mut guard = samples.lock().unwrap();
-                        guard.extend_from_slice(data);
+                        let available = MAX_CAPTURE_SAMPLES.saturating_sub(guard.len());
+                        guard.extend(data.iter().take(available).copied());
                     },
                     err_fn,
                     None,
@@ -219,7 +223,8 @@ pub async fn start_capture(
                             return;
                         }
                         let mut guard = samples.lock().unwrap();
-                        for &s in data {
+                        let available = MAX_CAPTURE_SAMPLES.saturating_sub(guard.len());
+                        for &s in data.iter().take(available) {
                             guard.push(s as f32 / 32768.0);
                         }
                     },
@@ -237,7 +242,8 @@ pub async fn start_capture(
                             return;
                         }
                         let mut guard = samples.lock().unwrap();
-                        for &s in data {
+                        let available = MAX_CAPTURE_SAMPLES.saturating_sub(guard.len());
+                        for &s in data.iter().take(available) {
                             guard.push((s as f32 / 32768.0) - 1.0);
                         }
                     },
@@ -270,6 +276,8 @@ pub async fn start_capture(
             return;
         }
 
+        let _ = started_tx.send(());
+
         eprintln!("Linux audio capture: Stream started successfully");
 
         // Keep thread alive until stop signal
@@ -284,23 +292,21 @@ pub async fn start_capture(
         eprintln!("Linux audio capture: Stream stopped");
     });
 
-    // Spawn timeout task
-    let stop_tx_clone = state.stop_tx.clone();
+    super::wait_for_start(state, started_rx).await?;
+
+    // This timer owns only its session's sender; it cannot stop a later capture.
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(max_duration_secs as u64)).await;
-        let tx = stop_tx_clone.lock().unwrap().take();
-        if let Some(tx) = tx {
-            let _ = tx.send(()).await;
-        }
+        let _ = tx.try_send(());
     });
 
     Ok(())
 }
 
-pub async fn stop_capture(state: &AudioCaptureState) -> Result<String, String> {
+pub async fn stop_capture(state: &AudioCaptureSession) -> Result<String, String> {
     // Signal stop
     if let Some(tx) = state.stop_tx.lock().unwrap().take() {
-        let _ = tx.send(());
+        let _ = tx.try_send(());
     }
 
     // Wait a bit for capture to stop
@@ -312,7 +318,7 @@ pub async fn stop_capture(state: &AudioCaptureState) -> Result<String, String> {
     }
 
     // Get samples
-    let samples = state.samples.lock().unwrap().clone();
+    let samples = std::mem::take(&mut *state.samples.lock().unwrap());
     let sample_rate = *state.sample_rate.lock().unwrap();
     let channels = *state.channels.lock().unwrap();
 
@@ -348,7 +354,7 @@ pub fn is_supported() -> bool {
             }
         }
     }
-    host.default_input_device().is_some()
+    false
 }
 
 fn samples_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>, String> {

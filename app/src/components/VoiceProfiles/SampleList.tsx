@@ -14,6 +14,7 @@ import {
 import { Slider } from '@/components/ui/slider';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { apiClient } from '@/lib/api/client';
 import { useDeleteSample, useProfileSamples, useUpdateSample } from '@/lib/hooks/useProfiles';
 import { formatAudioDuration } from '@/lib/utils/audio';
@@ -34,8 +35,9 @@ function MiniSamplePlayer({ audioUrl }: MiniSamplePlayerProps) {
 
   useEffect(() => {
     const audio = new Audio();
-    audio.crossOrigin = 'use-credentials';
-    audio.src = audioUrl;
+    audio.crossOrigin = 'anonymous';
+    const request = new AbortController();
+    setIsLoading(true);
     audioRef.current = audio;
 
     const handleLoadedMetadata = () => {
@@ -61,7 +63,23 @@ function MiniSamplePlayer({ audioUrl }: MiniSamplePlayerProps) {
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
 
+    void loadAudioSource(audioUrl, request.signal)
+      .then((src) => {
+        if (request.signal.aborted) {
+          releaseAudioSource(src);
+          return;
+        }
+        audio.src = src;
+      })
+      .catch((error) => {
+        if (!request.signal.aborted) {
+          setIsLoading(false);
+          console.error('Failed to load sample:', error);
+        }
+      });
     return () => {
+      request.abort();
+      releaseAudioSource(audio.src);
       audio.pause();
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('timeupdate', handleTimeUpdate);

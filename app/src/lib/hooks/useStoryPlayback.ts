@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
+import { toast } from '@/components/ui/use-toast';
+import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { apiClient } from '@/lib/api/client';
 import type { StoryItemDetail } from '@/lib/api/types';
 import { useStoryStore } from '@/stores/storyStore';
 
 interface ActiveSource {
-  source: AudioBufferSourceNode;
+  source: MediaElementAudioSourceNode;
+  audio: HTMLAudioElement;
+  request: AbortController;
   clipGain: GainNode;
   itemId: string;
   generationId: string;
@@ -16,9 +19,9 @@ interface ActiveSource {
 /**
  * Hook for managing timecode-based story playback using Web Audio API.
  * Supports multiple simultaneous audio sources for overlapping clips on different tracks.
- * Uses AudioContext for sample-accurate timing synchronization.
+ * Uses the AudioContext clock to synchronize the timeline and per-clip gains.
  */
-export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
+export function useStoryPlayback() {
   const isPlaying = useStoryStore((state) => state.isPlaying);
   const playbackItems = useStoryStore((state) => state.playbackItems);
   const playbackStartContextTime = useStoryStore((state) => state.playbackStartContextTime);
@@ -29,8 +32,6 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
   const audioContextRef = useRef<AudioContext | null>(null);
   // Master gain for volume control
   const masterGainRef = useRef<GainNode | null>(null);
-  // Preloaded AudioBuffers by generation_id (audio file is shared between split clips)
-  const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
   // Currently playing AudioBufferSourceNodes by item.id (unique per clip)
   const activeSourcesRef = useRef<Map<string, ActiveSource>>(new Map());
   // Animation frame for syncing visual playhead
@@ -63,19 +64,14 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
   const stopSource = useCallback((itemId: string) => {
     const activeSource = activeSourcesRef.current.get(itemId);
     if (activeSource) {
-      // Detach onended first so the natural-end handler doesn't race with
-      // the explicit teardown below and re-delete a fresh entry that has
-      // already been re-scheduled at this id.
-      activeSource.source.onended = null;
-      try {
-        activeSource.source.stop();
-      } catch {
-        // Source may have already stopped
-      }
-      // Hard-cut the audio graph regardless of whether stop() actually
-      // halted the buffer. Long imports were leaking audio when stop()
-      // was called on a source that was scheduled with a multi-minute
-      // duration; disconnecting from the destination guarantees silence.
+      activeSource.request.abort();
+      releaseAudioSource(activeSource.audio.src);
+      activeSource.audio.onended = null;
+      activeSource.audio.onloadedmetadata = null;
+      activeSource.audio.onerror = null;
+      activeSource.audio.pause();
+      activeSource.audio.removeAttribute('src');
+      activeSource.audio.load();
       try {
         activeSource.source.disconnect();
       } catch {
@@ -90,67 +86,8 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
     }
   }, []);
 
-  // Resolve the audio buffer key and URL for an item.
-  // When a version_id is pinned, use that version's audio; otherwise use the generation default.
-  const getAudioKey = (item: StoryItemDetail) =>
-    item.version_id ? `v:${item.version_id}` : item.generation_id;
-
-  const getAudioUrlForItem = (item: StoryItemDetail) =>
-    item.version_id
-      ? apiClient.getVersionAudioUrl(item.version_id)
-      : apiClient.getAudioUrl(item.generation_id);
-
-  // Preload audio files as AudioBuffers
-  useEffect(() => {
-    if (!items || items.length === 0) {
-      // Clear preloaded buffers when no items
-      audioBuffersRef.current.clear();
-      return;
-    }
-
-    const currentKeys = new Set(items.map(getAudioKey));
-    const audioContext = getAudioContext();
-
-    // Remove buffers for items that no longer exist
-    for (const [id] of audioBuffersRef.current) {
-      if (!currentKeys.has(id)) {
-        audioBuffersRef.current.delete(id);
-      }
-    }
-
-    // Preload audio for new items
-    const preloadPromises: Promise<void>[] = [];
-    for (const item of items) {
-      const key = getAudioKey(item);
-      if (!audioBuffersRef.current.has(key)) {
-        const audioUrl = getAudioUrlForItem(item);
-        console.log('[StoryPlayback] Preloading audio buffer:', key);
-
-        const preloadPromise = authenticatedFetch(audioUrl)
-          .then((response) => response.arrayBuffer())
-          .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
-          .then((audioBuffer) => {
-            audioBuffersRef.current.set(key, audioBuffer);
-            console.log(
-              '[StoryPlayback] Preloaded buffer:',
-              key,
-              'duration:',
-              audioBuffer.duration,
-            );
-          })
-          .catch((err) => {
-            console.error('[StoryPlayback] Failed to preload audio:', key, err);
-          });
-
-        preloadPromises.push(preloadPromise);
-      }
-    }
-
-    Promise.all(preloadPromises).then(() => {
-      console.log('[StoryPlayback] Preloaded', audioBuffersRef.current.size, 'audio buffers');
-    });
-  }, [items, getAudioContext]);
-
+  // HTML media elements stream and seek large clips without materializing
+  // their full PCM data in the renderer. Only currently active clips load.
   // Cleanup AudioContext on unmount
   useEffect(() => {
     return () => {
@@ -206,18 +143,6 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
     [playbackStartContextTime, playbackStartStoryTime],
   );
 
-  // Convert story time (ms) to AudioContext time
-  const storyTimeToContextTime = useCallback(
-    (storyTimeMs: number): number => {
-      if (playbackStartContextTime === null || playbackStartStoryTime === null) {
-        return 0;
-      }
-      const elapsedStoryTime = (storyTimeMs - playbackStartStoryTime) / 1000;
-      return playbackStartContextTime + elapsedStoryTime;
-    },
-    [playbackStartContextTime, playbackStartStoryTime],
-  );
-
   // Stop all sources
   const stopAllSources = useCallback(() => {
     console.log('[StoryPlayback] Stopping all sources');
@@ -231,10 +156,19 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
   const schedulePlayback = useCallback(
     (storyTimeMs: number, itemList: StoryItemDetail[]) => {
       const audioContext = getAudioContext();
-      const currentContextTime = audioContext.currentTime;
 
       // Find all items that should be playing
       const shouldBePlaying = findActiveItems(storyTimeMs, itemList);
+      if (shouldBePlaying.length > 32) {
+        useStoryStore.getState().pause();
+        toast({
+          title: 'Too many overlapping clips',
+          description: 'Play at most 32 simultaneous clips.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
       const shouldBePlayingIds = new Set(shouldBePlaying.map((item) => item.id));
 
       // Stop sources that shouldn't be playing anymore
@@ -247,43 +181,16 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
       // Schedule new sources for items that should be playing
       for (const item of shouldBePlaying) {
         if (!activeSourcesRef.current.has(item.id)) {
-          const bufferKey = getAudioKey(item);
-          const buffer = audioBuffersRef.current.get(bufferKey);
-          if (!buffer) {
-            console.warn('[StoryPlayback] Buffer not loaded for:', bufferKey);
-            continue;
-          }
-
-          // Calculate when this item should start in AudioContext time
-          const itemStartContextTime = storyTimeToContextTime(item.start_time_ms);
-
           // Calculate effective duration and trim offsets
           const trimStartSec = (item.trim_start_ms || 0) / 1000;
           const trimEndSec = (item.trim_end_ms || 0) / 1000;
           const effectiveDuration = item.duration - trimStartSec - trimEndSec;
           const itemEndStoryTime = item.start_time_ms + effectiveDuration * 1000;
 
-          // Calculate offset into the buffer (if seeking mid-way)
-          // Offset is relative to the trimmed start of the clip
-          const offsetIntoEffectiveClip = Math.max(0, (storyTimeMs - item.start_time_ms) / 1000);
-          const offsetIntoBuffer = trimStartSec + offsetIntoEffectiveClip;
-          const duration = effectiveDuration - offsetIntoEffectiveClip;
-
-          // If the item should have already started, schedule it to start immediately
-          const startAtContextTime = Math.max(currentContextTime, itemStartContextTime);
-
-          console.log('[StoryPlayback] Scheduling source:', {
-            itemId: item.id,
-            generationId: item.generation_id,
-            storyTimeMs,
-            itemStart: item.start_time_ms,
-            offsetIntoBuffer,
-            startAtContextTime,
-            duration,
-          });
-
-          const source = audioContext.createBufferSource();
-          source.buffer = buffer;
+          const audio = new Audio();
+          audio.crossOrigin = 'anonymous';
+          audio.preload = 'metadata';
+          const source = audioContext.createMediaElementSource(audio);
           // Per-clip gain so each item can override its level independently
           // of the master volume. Falls through 1.0 for any item without a
           // saved value (older rows pre-migration).
@@ -294,6 +201,8 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
 
           const activeSource: ActiveSource = {
             source,
+            audio,
+            request: new AbortController(),
             clipGain,
             itemId: item.id,
             generationId: item.generation_id,
@@ -303,18 +212,51 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
 
           activeSourcesRef.current.set(item.id, activeSource);
 
-          // Schedule playback
-          source.start(startAtContextTime, offsetIntoBuffer, duration);
-
-          // Clean up when source ends
-          source.onended = () => {
-            console.log('[StoryPlayback] Source ended:', item.id);
-            activeSourcesRef.current.delete(item.id);
+          audio.onloadedmetadata = () => {
+            if (activeSourcesRef.current.get(item.id) !== activeSource) return;
+            const elapsed = (useStoryStore.getState().currentTimeMs - item.start_time_ms) / 1000;
+            audio.currentTime = trimStartSec + Math.max(0, elapsed);
+            audio.play().catch((error) => {
+              if (activeSourcesRef.current.get(item.id) !== activeSource) return;
+              useStoryStore.getState().pause();
+              toast({
+                title: 'Playback failed',
+                description: String(error),
+                variant: 'destructive',
+              });
+            });
           };
+          audio.onerror = () => {
+            if (activeSourcesRef.current.get(item.id) !== activeSource) return;
+            useStoryStore.getState().pause();
+            toast({ title: 'Could not load story audio', variant: 'destructive' });
+          };
+          audio.onended = () => stopSource(item.id);
+          const url = item.version_id
+            ? apiClient.getVersionAudioUrl(item.version_id)
+            : apiClient.getAudioUrl(item.generation_id);
+          void loadAudioSource(url, activeSource.request.signal)
+            .then((src) => {
+              if (activeSourcesRef.current.get(item.id) !== activeSource) {
+                releaseAudioSource(src);
+                return;
+              }
+              audio.src = src;
+              audio.load();
+            })
+            .catch((error) => {
+              if (activeSource.request.signal.aborted) return;
+              useStoryStore.getState().pause();
+              toast({
+                title: 'Could not load story audio',
+                description: String(error),
+                variant: 'destructive',
+              });
+            });
         }
       }
     },
-    [getAudioContext, findActiveItems, storyTimeToContextTime, stopSource],
+    [getAudioContext, findActiveItems, stopSource],
   );
 
   // Sync visual playhead from AudioContext time
@@ -335,8 +277,7 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
         return;
       }
 
-      const currentContextTime = audioContext.currentTime;
-      const currentStoryTime = contextTimeToStoryTime(currentContextTime);
+      const currentStoryTime = contextTimeToStoryTime(audioContext.currentTime);
       const totalDuration = useStoryStore.getState().totalDurationMs;
 
       // Update store with current story time
