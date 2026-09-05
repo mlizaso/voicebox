@@ -19,12 +19,13 @@ import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy.orm import Session
 
 from .. import config
+from ..backends import resolve_tts_model_size
 from ..backends.mlx_tts_lifecycle import run_blocking_operation_cancellation_safe
 from ..database import (
     Generation as DBGeneration,
@@ -32,7 +33,7 @@ from ..database import (
     ProfileSample as DBProfileSample,
     VoiceProfile as DBVoiceProfile,
 )
-from ..models import ProfileSampleCreate, VoiceProfileCreate, VoiceProfileResponse
+from ..models import GenerationRequest, ProfileSampleCreate, VoiceProfileCreate, VoiceProfileResponse
 from ..utils.audio import save_audio, validate_and_load_reference_audio
 from ..utils.audio_metadata import (
     PORTABLE_AUDIO_MAX_CHANNELS,
@@ -1232,24 +1233,66 @@ def _inspect_generation_import(archive_source: ArchiveSource) -> _GenerationImpo
         text = generation_data["text"]
         language = generation_data["language"]
         duration = generation_data["duration"]
-        if not isinstance(text, str) or not text or len(text) > 50_000:
-            raise ValueError("Invalid manifest.json: generation.text is invalid")
-        if not isinstance(language, str) or not language:
-            raise ValueError("Invalid manifest.json: generation.language is invalid")
         if (
             isinstance(duration, bool)
             or not isinstance(duration, (int, float))
-            or not math.isfinite(float(duration))
             or duration < 0
             or duration > GENERATION_AUDIO_MAX_DURATION_SECONDS
+            or not math.isfinite(float(duration))
         ):
             raise ValueError("Invalid manifest.json: generation.duration is invalid")
         seed = generation_data.get("seed")
-        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
-            raise ValueError("Invalid manifest.json: generation.seed is invalid")
         instruct = generation_data.get("instruct")
-        if instruct is not None and (not isinstance(instruct, str) or len(instruct) > 500):
-            raise ValueError("Invalid manifest.json: generation.instruct is invalid")
+        engine = generation_data.get("engine", "qwen")
+        if engine is None:
+            engine = "qwen"
+        model_size = generation_data.get("model_size")
+        source = generation_data.get("source", "manual")
+        if not isinstance(source, str) or not 1 <= len(source) <= 50 or not source.isprintable():
+            raise ValueError("Invalid manifest.json: generation.source is invalid")
+        replay_settings = {
+            name: generation_data.get(name) for name in ("max_chunk_chars", "crossfade_ms", "normalize_audio")
+        }
+        try:
+            # Apply the same input constraints as live generation, without
+            # accepting archive-supplied profile IDs or invoking inference.
+            GenerationRequest.model_validate(
+                {
+                    "profile_id": "archive",
+                    "text": text,
+                    "language": language,
+                    "seed": seed,
+                    "instruct": instruct,
+                    "engine": "qwen" if engine == "import" else engine,
+                    "model_size": model_size,
+                    **{
+                        "normalize" if name == "normalize_audio" else name: value
+                        for name, value in replay_settings.items()
+                        if value is not None
+                    },
+                },
+                strict=True,
+            )
+            VoiceProfileCreate.model_validate({"name": profile_data.get("name", "Unknown Profile")}, strict=True)
+            if engine != "import":
+                # Older TADA archives may carry the global Qwen default even
+                # though their actual model was TADA 1B.
+                if engine == "tada" and model_size not in {None, "1B", "3B"}:
+                    model_size = "1B"
+                if model_size is not None:
+                    model_size = resolve_tts_model_size(engine, model_size)
+        except ValueError as exc:
+            raise ValueError("Invalid manifest.json: generation or profile metadata is invalid") from exc
+        created_at = generation_data.get("created_at")
+        if created_at is not None:
+            if not isinstance(created_at, str) or len(created_at) > 64:
+                raise ValueError("Invalid manifest.json: generation.created_at is invalid")
+            try:
+                created_at = datetime.fromisoformat(created_at)
+                if created_at.tzinfo is not None:
+                    created_at = created_at.astimezone(UTC).replace(tzinfo=None)
+            except (ValueError, OverflowError) as exc:
+                raise ValueError("Invalid manifest.json: generation.created_at is invalid") from exc
 
         selected_audio = _selected_generation_audio_member(manifest_data, members)
         if selected_audio.file_size <= 0:
@@ -1262,6 +1305,11 @@ def _inspect_generation_import(archive_source: ArchiveSource) -> _GenerationImpo
                 "duration": float(duration),
                 "seed": seed,
                 "instruct": instruct,
+                "engine": engine,
+                "model_size": model_size,
+                "created_at": created_at,
+                "source": source,
+                **replay_settings,
             },
             profile_data=profile_data,
             audio_member_name=_canonical_zip_member_name(selected_audio.filename),
@@ -1805,6 +1853,12 @@ async def export_generation_to_zip(generation_id: str, db: Session) -> ArchiveEx
             "duration": generation.duration,
             "seed": generation.seed,
             "instruct": generation.instruct,
+            "engine": generation.engine,
+            "model_size": generation.model_size,
+            "max_chunk_chars": generation.max_chunk_chars,
+            "crossfade_ms": generation.crossfade_ms,
+            "normalize_audio": generation.normalize_audio,
+            "source": generation.source,
             "created_at": generation.created_at.isoformat(),
         },
         "profile": {
@@ -1918,7 +1972,7 @@ async def import_generation_from_zip(
                 deletion_journal.rename_managed_entry(staging_relative, audio_relative)
                 stored_audio_path = config.to_storage_path(audio_destination)
 
-                created_at = datetime.utcnow()
+                created_at = plan.generation_data["created_at"] or datetime.utcnow()
                 db_generation = DBGeneration(
                     id=new_generation_id,
                     profile_id=profile_id,
@@ -1928,12 +1982,15 @@ async def import_generation_from_zip(
                     duration=audio_duration,
                     seed=plan.generation_data["seed"],
                     instruct=plan.generation_data["instruct"],
-                    engine="qwen",
-                    model_size=None,
+                    engine=plan.generation_data["engine"],
+                    model_size=plan.generation_data["model_size"],
+                    max_chunk_chars=plan.generation_data["max_chunk_chars"],
+                    crossfade_ms=plan.generation_data["crossfade_ms"],
+                    normalize_audio=plan.generation_data["normalize_audio"],
                     status="completed",
                     error=None,
                     is_favorited=False,
-                    source="manual",
+                    source=plan.generation_data["source"],
                     exact_request_sha256=None,
                     exact_envelope_sha256=None,
                     exact_effects_json=None,
@@ -1954,6 +2011,9 @@ async def import_generation_from_zip(
                         "instruct",
                         "engine",
                         "model_size",
+                        "max_chunk_chars",
+                        "crossfade_ms",
+                        "normalize_audio",
                         "status",
                         "error",
                         "is_favorited",

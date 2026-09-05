@@ -847,7 +847,25 @@ fn set_backend_override(
 
 /// Open a filesystem directory, never a renderer-supplied URL or executable.
 #[command]
-fn open_directory(app: tauri::AppHandle, path: String) -> Result<(), String> {
+fn open_directory(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<ServerState>,
+    path: String,
+    connection_id: String,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the main window can open server directories".into());
+    }
+    let connection = state.client_connection.lock().map_err(|e| e.to_string())?;
+    let connection = connection
+        .as_ref()
+        .ok_or("No server connection is available")?;
+    if connection.connection_id != connection_id
+        || !local_directory_request(&connection.server_url, &path)
+    {
+        return Err("Only local server directories can be opened".into());
+    }
     let directory = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -857,6 +875,24 @@ fn open_directory(app: tauri::AppHandle, path: String) -> Result<(), String> {
     app.shell()
         .open(directory.to_string_lossy().as_ref(), None)
         .map_err(|e| e.to_string())
+}
+
+fn local_directory_request(server_url: &str, path: &str) -> bool {
+    // Reject UNC/device paths before canonicalization can contact a network share.
+    if path.starts_with("//")
+        || path.starts_with("\\\\")
+        || !std::path::Path::new(path).is_absolute()
+    {
+        return false;
+    }
+    let Ok(url) = tauri::Url::parse(server_url) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+        && url.port_or_known_default() == Some(SERVER_PORT)
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 fn trusted_webview_origin(value: &str) -> bool {
@@ -1499,7 +1535,40 @@ fn main() {
 
 #[cfg(test)]
 mod security_tests {
-    use super::trusted_webview_origin;
+    use super::{local_directory_request, trusted_webview_origin};
+
+    #[test]
+    fn directory_open_rejects_remote_and_network_paths_before_filesystem_access() {
+        let local_path = std::env::temp_dir();
+        let local_path = local_path.to_str().unwrap();
+        for server in [
+            "http://127.0.0.1:17493",
+            "http://localhost:17493",
+            "http://[::1]:17493",
+        ] {
+            assert!(local_directory_request(server, local_path), "{server}");
+        }
+        for server in [
+            "https://remote.example",
+            "http://localhost:8000",
+            "file://localhost:17493",
+            "http://user@localhost:17493",
+        ] {
+            assert!(!local_directory_request(server, local_path), "{server}");
+        }
+        for path in [
+            "//host/share",
+            "\\\\host\\share",
+            "\\\\?\\UNC\\host\\share",
+            "relative/path",
+            "https://example.com",
+        ] {
+            assert!(
+                !local_directory_request("http://127.0.0.1:17493", path),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn media_permission_requires_exact_app_origin() {

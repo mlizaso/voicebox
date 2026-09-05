@@ -98,6 +98,23 @@ def test_import_audio_publishes_valid_file_and_completed_row(
     db.close()
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["x" * 100_000 + ".wav", "\0\n.wav", "C:\\folder\\clip.wav"],
+    ids=["overlong", "control-characters", "windows-path"],
+)
+def test_import_audio_bounds_filename_metadata_without_changing_audio(tmp_path, monkeypatch, filename):
+    _data_dir, db = _database(tmp_path, monkeypatch)
+    try:
+        response = asyncio.run(generations.import_audio(_Upload(_wav_bytes(), filename), db))
+        row = db.query(Generation).filter_by(id=response.id).one()
+        assert 0 < len(row.text.encode("utf-8")) <= 255
+        assert not any(character in row.text for character in ("\0", "\n", "\\"))
+        assert config.resolve_storage_path(row.audio_path).read_bytes() == _wav_bytes()
+    finally:
+        db.close()
+
+
 def test_import_audio_probes_duration_off_loop_without_decoding_pcm(
     tmp_path,
     monkeypatch,

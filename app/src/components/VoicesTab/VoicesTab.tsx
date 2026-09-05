@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Mic, Plus, Search, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ServerImage } from '@/components/ServerImage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -198,7 +199,6 @@ function VoiceRow({
 }: VoiceRowProps) {
   const { t } = useTranslation();
   const serverUrl = useServerStore((state) => state.serverUrl);
-  const [avatarError, setAvatarError] = useState(false);
   const avatarUrl = profile.avatar_path ? `${serverUrl}/profiles/${profile.id}/avatar` : null;
 
   const enabledEffects = profile.effects_chain?.filter((e) => e.enabled) ?? [];
@@ -212,12 +212,12 @@ function VoiceRow({
       <TableCell>
         <div className="flex w-full min-w-0 items-center gap-2">
           <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center shrink-0 overflow-hidden">
-            {avatarUrl && !avatarError ? (
-              <img
+            {avatarUrl ? (
+              <ServerImage
                 src={avatarUrl}
+                fallback={<Mic className="h-4 w-4 text-muted-foreground" />}
                 alt={t('voicesTab.avatarAlt', { name: profile.name })}
                 className="h-full w-full object-cover"
-                onError={() => setAvatarError(true)}
               />
             ) : (
               <Mic className="h-4 w-4 text-muted-foreground" />

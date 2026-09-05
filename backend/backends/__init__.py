@@ -191,11 +191,9 @@ class LLMBackend(Protocol):
         """
         ...
 
-    def unload_model(self) -> None:
-        ...
+    def unload_model(self) -> None: ...
 
-    def is_loaded(self) -> bool:
-        ...
+    def is_loaded(self) -> bool: ...
 
 
 # Global backend instances
@@ -432,7 +430,16 @@ def _get_qwen_llm_configs() -> list[ModelConfig]:
         repo_4 = "Qwen/Qwen3-4B"
 
     common_languages = [
-        "en", "zh", "ja", "ko", "de", "fr", "ru", "pt", "es", "it",
+        "en",
+        "zh",
+        "ja",
+        "ko",
+        "de",
+        "fr",
+        "ru",
+        "pt",
+        "es",
+        "it",
     ]
 
     return [
@@ -523,6 +530,20 @@ def engine_has_model_sizes(engine: str) -> bool:
     """Whether this engine supports multiple model sizes (only Qwen currently)."""
     configs = [c for c in get_tts_model_configs() if c.engine == engine]
     return len(configs) > 1
+
+
+def resolve_tts_model_size(engine: str, model_size: str | None) -> str | None:
+    """Resolve an engine's default and reject unsupported size variants."""
+    configs = [config for config in get_tts_model_configs() if config.engine == engine]
+    if not configs:
+        raise ValueError(f"Unknown TTS engine: {engine}")
+    if len(configs) == 1:
+        return None  # Existing clients supply irrelevant sizes for these engines.
+    if model_size is None:
+        return configs[0].model_size
+    if model_size not in {config.model_size for config in configs}:
+        raise ValueError(f"Unsupported model size for {engine}: {model_size}")
+    return model_size
 
 
 async def load_engine_model(engine: str, model_size: str = "default") -> None:

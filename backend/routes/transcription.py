@@ -34,8 +34,8 @@ ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", 
 @router.post("/transcribe", response_model=models.TranscriptionResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
-    language: str | None = Form(None),
-    model: str | None = Form(None),
+    language: str | None = Form(None, pattern=models.TRANSCRIPTION_LANGUAGE_PATTERN, max_length=2),
+    model: str | None = Form(None, pattern=models.TRANSCRIPTION_MODEL_PATTERN, max_length=6),
 ):
     """Transcribe audio file to text."""
     uploaded_ext = Path(file.filename or "").suffix.lower()

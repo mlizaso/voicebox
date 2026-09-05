@@ -110,6 +110,10 @@ export interface GenerationResponse {
   instruct?: string;
   engine?: string;
   model_size?: string;
+  max_chunk_chars?: number | null;
+  crossfade_ms?: number | null;
+  normalize_audio?: boolean | null;
+  source?: string;
   status: 'loading_model' | 'generating' | 'completed' | 'failed';
   error?: string;
   is_favorited?: boolean;

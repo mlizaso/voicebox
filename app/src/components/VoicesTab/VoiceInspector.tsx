@@ -5,6 +5,7 @@ import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import * as z from 'zod';
 import { EffectsChainEditor } from '@/components/Effects/EffectsChainEditor';
+import { ServerImage } from '@/components/ServerImage';
 import { Button } from '@/components/ui/button';
 import {
   Form,
@@ -69,7 +70,6 @@ export function VoiceInspector({ profileId }: VoiceInspectorProps) {
   const { toast } = useToast();
 
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
-  const [avatarError, setAvatarError] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -110,7 +110,6 @@ export function VoiceInspector({ profileId }: VoiceInspectorProps) {
     } else {
       setAvatarPreview(null);
     }
-    setAvatarError(false);
   }, [profile, serverUrl]);
 
   function handleAvatarFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -230,12 +229,12 @@ export function VoiceInspector({ profileId }: VoiceInspectorProps) {
             <div className="flex justify-center pt-5 pb-3">
               <div className="relative group">
                 <div className="h-20 w-20 rounded-full bg-muted flex items-center justify-center shrink-0 overflow-hidden border-2 border-border">
-                  {avatarPreview && !avatarError ? (
-                    <img
+                  {avatarPreview ? (
+                    <ServerImage
                       src={avatarPreview}
+                      fallback={<Mic className="h-8 w-8 text-muted-foreground" />}
                       alt={profile.name}
                       className="h-full w-full object-cover"
-                      onError={() => setAvatarError(true)}
                     />
                   ) : (
                     <Mic className="h-8 w-8 text-muted-foreground" />

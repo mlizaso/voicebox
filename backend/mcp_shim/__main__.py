@@ -18,6 +18,8 @@ Exit 0 on clean EOF, 1 on transport error, 2 if backend never answers.
 from __future__ import annotations
 
 import asyncio
+import codecs
+import io
 import ipaddress
 import json
 import os
@@ -30,6 +32,9 @@ CLIENT_ID_HEADER = "X-Voicebox-Client-Id"
 SESSION_HEADER = "mcp-session-id"
 HEALTH_TIMEOUT_S = 30.0
 DEFAULT_PORT = 17493
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+# Match the server's 200 MiB base64 transcription upload plus JSON framing.
+MAX_REQUEST_BYTES = 4 * ((200 * 1024 * 1024 + 2) // 3) + 1024 * 1024
 
 
 def _err(msg: str) -> None:
@@ -74,10 +79,10 @@ async def _wait_for_backend(client: httpx.AsyncClient, health_url: str) -> bool:
     deadline = loop.time() + HEALTH_TIMEOUT_S
     while loop.time() < deadline:
         try:
-            r = await client.get(health_url, timeout=2.0)
-            if r.status_code == 200:
-                return True
-        except Exception:
+            async with client.stream("GET", health_url, timeout=2.0) as response:
+                if response.status_code == 200:
+                    return True
+        except httpx.HTTPError:
             pass
         await asyncio.sleep(0.5)
     return False
@@ -86,7 +91,9 @@ async def _wait_for_backend(client: httpx.AsyncClient, health_url: str) -> bool:
 async def _read_stdin_line() -> str | None:
     """Async-read a single line from stdin. Returns None on EOF."""
     loop = asyncio.get_running_loop()
-    line = await loop.run_in_executor(None, sys.stdin.readline)
+    line = await loop.run_in_executor(None, sys.stdin.readline, MAX_REQUEST_BYTES + 1)
+    if len(line) > MAX_REQUEST_BYTES or len(line.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ValueError("MCP request exceeds the size limit")
     if not line:
         return None
     return line
@@ -97,6 +104,58 @@ def _write_stdout(obj: Any) -> None:
     sys.stdout.write(json.dumps(obj, separators=(",", ":")))
     sys.stdout.write("\n")
     sys.stdout.flush()
+
+
+async def _response_body(response: httpx.Response) -> bytes:
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+            raise ValueError("MCP response exceeds the size limit")
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def _response_lines(response: httpx.Response):
+    # Bound incomplete lines before HTTPX's line iterator could accumulate an
+    # unlimited response. Decode UTF-8 and CR/LF across network chunk boundaries.
+    decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8-sig")("replace"), translate=True)
+    pending = io.StringIO()
+    pending_bytes = 0
+    async for chunk in response.aiter_bytes():
+        # StringIO avoids repeatedly copying a long incomplete line when a
+        # peer sends tiny fragments. Slice large transport chunks before decode.
+        for offset in range(0, len(chunk), 64 * 1024):
+            lines = decoder.decode(chunk[offset : offset + 64 * 1024]).split("\n")
+            for index, line in enumerate(lines):
+                pending_bytes += len(line.encode("utf-8"))
+                if pending_bytes > MAX_RESPONSE_BYTES:
+                    raise ValueError("MCP response exceeds the size limit")
+                pending.write(line)
+                if index < len(lines) - 1:
+                    yield pending.getvalue()
+                    pending = io.StringIO()
+                    pending_bytes = 0
+    for line in (pending.getvalue() + decoder.decode(b"", final=True)).split("\n")[:-1]:
+        if len(line.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise ValueError("MCP response exceeds the size limit")
+        yield line
+
+
+async def _sse_payloads(response: httpx.Response):
+    fields: list[str] = []
+    event_bytes = 0
+    async for line in _response_lines(response):
+        if not line:
+            if fields:
+                yield "\n".join(fields)
+            fields.clear()
+            event_bytes = 0
+        elif line == "data" or line.startswith("data:"):
+            value = line[5:].removeprefix(" ")
+            event_bytes += len(value.encode("utf-8")) + 1
+            if event_bytes > MAX_RESPONSE_BYTES:
+                raise ValueError("MCP response exceeds the size limit")
+            fields.append(value)
 
 
 async def _handle_request(
@@ -135,7 +194,10 @@ async def _handle_request(
         if response.status_code == 202:
             return  # notification acknowledged
         if response.status_code >= 400:
-            body = await response.aread()
+            body = b""
+            async for chunk in response.aiter_bytes(chunk_size=4096):
+                body = chunk
+                break
             _err(f"server {response.status_code}: {body.decode('utf-8', errors='replace')[:400]}")
             if is_notification:
                 return
@@ -151,20 +213,17 @@ async def _handle_request(
             )
             return
 
-        ctype = response.headers.get("content-type", "")
+        ctype = response.headers.get("content-type", "").lower()
         if "text/event-stream" in ctype:
-            # SSE frames: lines prefixed "data: ..." contain the JSON-RPC msg.
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    payload = line[5:].strip()
-                    if not payload:
-                        continue
-                    try:
-                        _write_stdout(json.loads(payload))
-                    except json.JSONDecodeError:
-                        _err(f"malformed SSE payload: {payload[:200]}")
+            async for payload in _sse_payloads(response):
+                if not payload.strip():
+                    continue
+                try:
+                    _write_stdout(json.loads(payload))
+                except json.JSONDecodeError:
+                    _err(f"malformed SSE payload: {payload[:200]}")
         else:
-            body = await response.aread()
+            body = await _response_body(response)
             try:
                 _write_stdout(json.loads(body))
             except json.JSONDecodeError:

@@ -33,8 +33,8 @@ CAPTURE_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
 async def create_capture_endpoint(
     file: UploadFile = File(...),
     source: str = Form("file"),
-    language: str | None = Form(None),
-    stt_model: str | None = Form(None),
+    language: str | None = Form(None, pattern=models.CAPTURE_LANGUAGE_PATTERN, max_length=4),
+    stt_model: str | None = Form(None, pattern=models.TRANSCRIPTION_MODEL_PATTERN, max_length=6),
     db: Session = Depends(get_db),
 ):
     """Upload audio, run STT, persist the capture."""
@@ -63,6 +63,11 @@ async def create_capture_endpoint(
             resolved_language = None if saved.language == "auto" else saved.language
         else:
             resolved_language = None if language == "auto" else language
+
+        try:
+            models.TranscriptionRequest(language=resolved_language, model=resolved_stt)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid transcription language or model") from exc
 
         # The capture service does not need a DB connection until it publishes
         # the final row. Release the settings read before STT waits on the

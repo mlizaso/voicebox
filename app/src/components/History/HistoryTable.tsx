@@ -606,6 +606,7 @@ export function HistoryTable() {
                             size="icon"
                             className="h-6 w-6 text-muted-foreground/50 hover:bg-muted-foreground/20 hover:text-muted-foreground"
                             aria-label="Retry generation"
+                            disabled={gen.engine === 'import'}
                             onClick={() => handleRetry(gen.id)}
                           >
                             <RotateCcw className="h-2 w-2" />
@@ -674,7 +675,10 @@ export function HistoryTable() {
                               <Wand2 className="mr-2 h-4 w-4" />
                               {t('history.actions.applyEffects')}
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => handleRegenerate(gen.id)}>
+                            <DropdownMenuItem
+                              onClick={() => handleRegenerate(gen.id)}
+                              disabled={gen.engine === 'import'}
+                            >
                               <RotateCcw className="mr-2 h-4 w-4" />
                               {t('history.actions.regenerate')}
                             </DropdownMenuItem>

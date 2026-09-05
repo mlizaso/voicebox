@@ -205,7 +205,6 @@ async def run_generation(
     mode: Literal["generate", "retry", "regenerate"],
     max_chunk_chars: int | None = None,
     crossfade_ms: int | None = None,
-    version_id: str | None = None,
     expected_voice_binding_sha256: str | None = None,
     exact_voice_snapshot: dict | None = None,
     expected_tts_implementation_revision: str | None = None,
@@ -316,8 +315,8 @@ async def run_generation(
                 **gen_kwargs,
             )
 
-        # --- Normalize (generate and regenerate always; retry skips) -----
-        if normalize or mode == "regenerate":
+        # The route resolves stored settings, including legacy replay defaults.
+        if normalize:
             audio = await run_blocking_operation_cancellation_safe(normalize_audio, audio)
 
         duration = len(audio) / sample_rate
@@ -342,7 +341,6 @@ async def run_generation(
         elif mode == "regenerate":
             final_path = await _save_regenerate(
                 generation_id=generation_id,
-                version_id=version_id,
                 audio=audio,
                 sample_rate=sample_rate,
                 db=bg_db,
@@ -941,7 +939,6 @@ async def generate_audio_sync(
 async def _save_regenerate(
     *,
     generation_id: str,
-    version_id: str | None,
     audio,
     sample_rate: int,
     db,

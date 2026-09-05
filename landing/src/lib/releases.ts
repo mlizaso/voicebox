@@ -23,6 +23,8 @@ const CACHE_DURATION = 1000 * 60 * 5; // 5 minutes
 // Cache for star count
 let cachedStarCount: number | null = null;
 let starCacheTimestamp: number = 0;
+let releaseRequest: Promise<ReleaseInfo> | null = null;
+let starRequest: Promise<number> | null = null;
 
 /**
  * Fetches the latest release from GitHub and extracts download links
@@ -33,9 +35,19 @@ export async function getLatestRelease(): Promise<ReleaseInfo> {
   if (cachedReleaseInfo && now - cacheTimestamp < CACHE_DURATION) {
     return cachedReleaseInfo;
   }
+  if (!releaseRequest) {
+    releaseRequest = fetchLatestRelease().finally(() => {
+      releaseRequest = null;
+    });
+  }
+  return releaseRequest;
+}
 
+async function fetchLatestRelease(): Promise<ReleaseInfo> {
+  const signal = AbortSignal.timeout(10_000);
   try {
     const response = await fetch(`${GITHUB_API_BASE}/repos/${GITHUB_REPO}/releases/latest`, {
+      signal,
       cache: 'no-store',
       headers: {
         Accept: 'application/vnd.github.v3+json',
@@ -74,7 +86,7 @@ export async function getLatestRelease(): Promise<ReleaseInfo> {
     }
 
     // Fetch total downloads across ALL releases
-    const totalDownloads = await getTotalDownloads();
+    const totalDownloads = await getTotalDownloads(signal);
 
     // Fallback: construct URLs if not found in assets
     const baseUrl = `https://github.com/${GITHUB_REPO}/releases/download/${version}`;
@@ -95,64 +107,47 @@ export async function getLatestRelease(): Promise<ReleaseInfo> {
 
     // Update cache
     cachedReleaseInfo = releaseInfo;
-    cacheTimestamp = now;
+    cacheTimestamp = Date.now();
 
     return releaseInfo;
   } catch (error) {
     console.error('Failed to fetch latest release:', error);
+    if (cachedReleaseInfo) return cachedReleaseInfo;
     throw error;
   }
 }
 
-// Cache for total download count
-let cachedTotalDownloads: number | null = null;
-let downloadsCacheTimestamp: number = 0;
-
 /**
  * Fetches download counts across ALL releases (paginated)
  */
-async function getTotalDownloads(): Promise<number> {
-  const now = Date.now();
-  if (cachedTotalDownloads !== null && now - downloadsCacheTimestamp < CACHE_DURATION) {
-    return cachedTotalDownloads;
-  }
-
+async function getTotalDownloads(signal: AbortSignal): Promise<number> {
   let total = 0;
   let page = 1;
 
-  try {
-    while (true) {
-      const response = await fetch(
-        `${GITHUB_API_BASE}/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}`,
-        {
-          cache: 'no-store',
-          headers: { Accept: 'application/vnd.github.v3+json' },
-        },
-      );
+  while (true) {
+    const response = await fetch(
+      `${GITHUB_API_BASE}/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}`,
+      {
+        signal,
+        cache: 'no-store',
+        headers: { Accept: 'application/vnd.github.v3+json' },
+      },
+    );
 
-      if (!response.ok) break;
+    if (!response.ok) throw new Error(`GitHub API error: ${response.status}`);
 
-      const releases = await response.json();
-      if (!Array.isArray(releases) || releases.length === 0) break;
+    const releases = await response.json();
+    if (!Array.isArray(releases)) throw new Error('Invalid GitHub release list');
 
-      for (const release of releases) {
-        for (const asset of release.assets || []) {
-          total += asset.download_count || 0;
-        }
+    for (const release of releases) {
+      for (const asset of release.assets || []) {
+        total += asset.download_count || 0;
       }
-
-      if (releases.length < 100) break;
-      page++;
     }
 
-    cachedTotalDownloads = total;
-    downloadsCacheTimestamp = now;
-  } catch (error) {
-    console.error('Failed to fetch total downloads:', error);
-    if (cachedTotalDownloads !== null) return cachedTotalDownloads;
+    if (releases.length < 100) return total;
+    page++;
   }
-
-  return total;
 }
 
 /**
@@ -163,9 +158,18 @@ export async function getStarCount(): Promise<number> {
   if (cachedStarCount !== null && now - starCacheTimestamp < CACHE_DURATION) {
     return cachedStarCount;
   }
+  if (!starRequest) {
+    starRequest = fetchStarCount().finally(() => {
+      starRequest = null;
+    });
+  }
+  return starRequest;
+}
 
+async function fetchStarCount(): Promise<number> {
   try {
     const response = await fetch(`${GITHUB_API_BASE}/repos/${GITHUB_REPO}`, {
+      signal: AbortSignal.timeout(10_000),
       next: { revalidate: 600 },
       headers: {
         Accept: 'application/vnd.github.v3+json',
@@ -180,7 +184,7 @@ export async function getStarCount(): Promise<number> {
     const count = repo.stargazers_count ?? 0;
 
     cachedStarCount = count;
-    starCacheTimestamp = now;
+    starCacheTimestamp = Date.now();
 
     return count;
   } catch (error) {

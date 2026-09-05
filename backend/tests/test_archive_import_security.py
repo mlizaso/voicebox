@@ -110,6 +110,30 @@ def _generation_archive(*, duration: float = 2.0, audio: bytes | None = None) ->
     )
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("generation", "language", "x" * 1000),
+        ("generation", "seed", -1),
+        ("generation", "seed", 2**32),
+        ("generation", "seed", 10**100),
+        ("profile", "name", "x" * 101),
+        ("generation", "engine", "unknown"),
+        ("generation", "created_at", "invalid date"),
+        ("generation", "created_at", "0001-01-01T00:00:00+23:00"),
+        ("generation", "duration", 10**1000),
+        ("generation", "source", "x" * 51),
+    ],
+)
+def test_generation_import_rejects_invalid_metadata_during_preflight(section, field, value):
+    with zipfile.ZipFile(io.BytesIO(_generation_archive())) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    manifest[section][field] = value
+    hostile = _zip_bytes([("manifest.json", json.dumps(manifest).encode()), ("audio/import.wav", b"unused")])
+    with pytest.raises(ValueError, match=r"Invalid manifest\.json"):
+        export_import._inspect_generation_import(hostile)
+
+
 def test_profile_import_preflight_enforces_conditioning_contract(monkeypatch):
     assert export_import.PROFILE_ARCHIVE_MAX_SAMPLES == 64
     assert export_import.EXACT_VOICE_SNAPSHOT_MAX_SAMPLE_BYTES == 64 * 1024 * 1024

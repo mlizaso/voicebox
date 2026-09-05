@@ -191,7 +191,14 @@ async def test_non_wav_generation_export_round_trips_without_reencoding(db, stor
         language="en",
         audio_path="generations/imported.flac",
         duration=1.0,
-        created_at=datetime.utcnow(),
+        engine="tada",
+        model_size="3B",
+        seed=1234,
+        max_chunk_chars=345,
+        crossfade_ms=0,
+        normalize_audio=False,
+        source="personality_speak",
+        created_at=datetime(2024, 2, 3, 4, 5, 6),
     )
     db.add(generation)
     db.commit()
@@ -215,6 +222,14 @@ async def test_non_wav_generation_export_round_trips_without_reencoding(db, stor
     assert imported_path is not None
     assert imported_path.suffix == ".flac"
     assert imported_path.read_bytes() == source_bytes
+    assert imported.engine == "tada"
+    assert imported.model_size == "3B"
+    assert imported.seed == 1234
+    assert imported.max_chunk_chars == 345
+    assert imported.crossfade_ms == 0
+    assert imported.normalize_audio is False
+    assert imported.source == "personality_speak"
+    assert imported.created_at == datetime(2024, 2, 3, 4, 5, 6)
 
 
 @pytest.mark.asyncio

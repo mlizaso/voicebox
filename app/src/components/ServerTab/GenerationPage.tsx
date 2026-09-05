@@ -7,13 +7,15 @@ import { Toggle } from '@/components/ui/toggle';
 import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
 import { useGenerationSettings } from '@/lib/hooks/useSettings';
 import { usePlatform } from '@/platform/PlatformContext';
-import { useServerStore } from '@/stores/serverStore';
+import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 import { SettingRow, SettingSection } from './SettingRow';
 
 export function GenerationPage() {
   const { t } = useTranslation();
   const platform = usePlatform();
   const serverUrl = useServerStore((state) => state.serverUrl);
+  const connectionId = useServerStore((state) => state.connectionId);
+  const canOpenFolder = platform.metadata.isTauri && isLoopbackVoiceboxServerUrl(serverUrl);
   const { settings, update } = useGenerationSettings();
   const persistedMaxChunkChars = settings?.max_chunk_chars ?? 800;
   const persistedCrossfadeMs = settings?.crossfade_ms ?? 50;
@@ -30,19 +32,24 @@ export function GenerationPage() {
   const [generationsPath, setGenerationsPath] = useState<string | null>(null);
 
   useEffect(() => {
-    authenticatedFetch(`${serverUrl}/health/filesystem`)
+    const controller = new AbortController();
+    setGenerationsPath(null);
+    authenticatedFetch(`${serverUrl}/health/filesystem`, { signal: controller.signal })
       .then((res) => res.json())
       .then((data) => {
+        if (controller.signal.aborted || useServerStore.getState().connectionId !== connectionId)
+          return;
         const genDir = data.directories?.find((d: { path: string }) =>
           d.path.includes('generations'),
         );
         if (genDir?.path) setGenerationsPath(genDir.path);
       })
       .catch(() => {});
-  }, [serverUrl]);
+    return () => controller.abort();
+  }, [serverUrl, connectionId]);
 
   const openGenerationsFolder = useCallback(async () => {
-    if (!generationsPath) return;
+    if (!canOpenFolder || !generationsPath) return;
     setOpening(true);
     try {
       await platform.filesystem.openPath(generationsPath);
@@ -51,7 +58,7 @@ export function GenerationPage() {
     } finally {
       setOpening(false);
     }
-  }, [platform, generationsPath]);
+  }, [platform, generationsPath, canOpenFolder]);
 
   return (
     <div className="flex gap-8 items-start max-w-5xl">
@@ -138,7 +145,7 @@ export function GenerationPage() {
                 variant="outline"
                 size="sm"
                 onClick={openGenerationsFolder}
-                disabled={opening || !generationsPath}
+                disabled={opening || !canOpenFolder || !generationsPath}
               >
                 <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
                 {t('settings.generation.folder.open')}

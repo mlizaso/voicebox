@@ -64,7 +64,11 @@ async def spool_upload_bounded(
     """
     if max_bytes <= 0 or chunk_bytes <= 0:
         raise ValueError("Upload bounds must be positive")
-    if suffix and (Path(suffix).name != suffix or not suffix.startswith(".")):
+    if suffix and (
+        len(suffix.encode("utf-8")) > 32
+        or not suffix.startswith(".")
+        or any(character in suffix for character in ("/", "\\", "\0"))
+    ):
         raise ValueError("Temporary upload suffix must be one safe extension")
 
     descriptor, raw_path = tempfile.mkstemp(prefix="voicebox-upload-", suffix=suffix)

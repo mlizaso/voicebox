@@ -6,6 +6,7 @@ import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import * as z from 'zod';
 import { EffectsChainEditor } from '@/components/Effects/EffectsChainEditor';
+import { ServerImage } from '@/components/ServerImage';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -1124,8 +1125,9 @@ export function ProfileForm() {
                             <div className="relative group">
                               <div className="h-24 w-24 rounded-full bg-muted flex items-center justify-center shrink-0 overflow-hidden border-2 border-border">
                                 {avatarPreview ? (
-                                  <img
+                                  <ServerImage
                                     src={avatarPreview}
+                                    fallback={<Mic className="h-10 w-10 text-muted-foreground" />}
                                     alt={t('profileForm.avatar.alt')}
                                     className="h-full w-full object-cover"
                                   />

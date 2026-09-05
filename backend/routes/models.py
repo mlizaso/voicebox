@@ -114,8 +114,8 @@ def _owned_model_migration_task() -> asyncio.Task | None:
 
 
 def _move_model_cache_directory(source: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Destination already exists: {destination}")
     shutil.move(str(source), str(destination))
 
 
@@ -266,6 +266,11 @@ async def migrate_models(request: models.ModelMigrateRequest):
     source = Path(hf_constants.HF_HUB_CACHE)
     destination = Path(request.destination)
 
+    if destination.is_symlink() or destination.is_junction():
+        raise HTTPException(status_code=400, detail="Destination must not be a symlink or junction")
+    if destination.exists() and not destination.is_dir():
+        raise HTTPException(status_code=400, detail="Destination must be a directory")
+
     if not source.exists():
         raise HTTPException(status_code=404, detail="Current model cache directory not found")
 
@@ -286,14 +291,26 @@ async def migrate_models(request: models.ModelMigrateRequest):
                 if not source.exists():
                     raise FileNotFoundError("Current model cache directory not found")
                 model_dirs = [item for item in source.iterdir() if item.name.startswith("models--") and item.is_dir()]
-                if not scan_complete.done():
-                    scan_complete.set_result(len(model_dirs))
+                if destination.is_symlink() or destination.is_junction():
+                    raise ValueError("Destination must not be a symlink or junction")
+                # Check the whole move before changing either cache. Never replace
+                # a model directory the caller may already own at the destination.
+                for item in model_dirs:
+                    if item.is_symlink() or item.is_junction():
+                        raise ValueError(f"Model cache directory is a link: {item.name}")
+                    target = destination / item.name
+                    if target.exists() or target.is_symlink():
+                        raise FileExistsError(f"Destination already exists: {target}")
                 if not model_dirs:
+                    if not scan_complete.done():
+                        scan_complete.set_result(0)
                     progress_manager.update_progress("migration", 1, 1, status="complete")
                     progress_manager.mark_complete("migration")
                     return
 
                 destination.mkdir(parents=True, exist_ok=True)
+                if not scan_complete.done():
+                    scan_complete.set_result(len(model_dirs))
                 same_fs = False
                 with suppress(OSError):
                     same_fs = source.stat().st_dev == destination.stat().st_dev
@@ -334,11 +351,8 @@ async def migrate_models(request: models.ModelMigrateRequest):
                     for item in model_dirs:
                         dest_item = destination / item.name
                         try:
-                            if dest_item.exists():
-                                await run_blocking_operation_cancellation_safe(
-                                    shutil.rmtree,
-                                    dest_item,
-                                )
+                            if dest_item.exists() or dest_item.is_symlink():
+                                raise FileExistsError(f"Destination already exists: {dest_item}")
                             copied = await run_blocking_operation_cancellation_safe(
                                 _copy_with_progress,
                                 item,

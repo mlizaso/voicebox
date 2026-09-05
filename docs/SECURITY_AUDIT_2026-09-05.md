@@ -118,3 +118,70 @@ immediately; retention is capped at 32 pending targets and one hour.
 The exact MLX source fingerprint was refreshed because executable generation
 code changed; pending exact-resume jobs from a different fingerprint correctly
 remain incompatible. This audit is not a guarantee that no vulnerabilities remain.
+
+## Second pass: security, modularity, and generation preservation
+
+The follow-up review checked backend ingress and filesystem operations, desktop
+and client boundaries, and generation persistence/replay. Three independent
+read-only reviews covered these areas; confirmed findings were reproduced and
+rechecked against the integrated changes.
+
+- Bounded MCP stdin, JSON responses, SSE lines and complete SSE events. Health
+  checks no longer read response bodies, error diagnostics read a bounded prefix,
+  and fragmented SSE data is accumulated without repeated whole-line copying.
+- Validated multipart transcription parameters before audio processing, bounded
+  temporary upload suffixes, and sanitized imported display filenames. Archive
+  imports now reuse live request validation for generation and profile metadata.
+- Prevented model-cache migration from deleting existing destination models.
+  Conflicts and linked model roots are rejected before moving any model.
+- Restricted native directory opening to the current local server connection
+  and main window. Network/device paths are rejected before canonicalization;
+  stale filesystem responses are discarded after changing servers.
+- Added one authenticated avatar component shared by four callers. It bounds
+  downloads, omits cookies, releases blob URLs, and isolates connection changes.
+- Made history responses extend the generation response model and removed unused
+  regeneration version-ID plumbing. Added shared engine/model-size validation,
+  retaining the actual TADA fallback used by old records.
+- Persisted chunk size, crossfade, and normalization in the existing generation
+  transaction. Retry and regeneration now reuse those settings. Nullable columns
+  retain legacy defaults for old rows. Archive round trips preserve engine,
+  model, seed, timestamp, source, settings, and the original audio bytes.
+  Directly imported audio cannot be treated as a missing TTS request for replay.
+- Coalesced concurrent release and star lookups and bounded their fetch duration.
+  Failed pagination retains the previous complete result. In a controlled check,
+  20 simultaneous release lookups used three upstream requests instead of 60,
+  with the same returned download total. This measures duplicate work, not
+  production network latency or audiobook generation time.
+
+Final validation passed 884 backend tests (four platform skips), 26 shared-app
+tests, four landing tests, and 11 native unit tests. The shared `bun run ci`,
+landing webpack production build, and native `cargo check --all-targets` passed.
+The separate audiobook renderer passed 76 focused I/O, phrasing, and recovery
+tests plus 19 subtests, including audio-byte checks. Disabling persistence of
+the new replay settings in a temporary mutation made all four replay regression
+cases fail, confirming that those tests detect the original loss of settings.
+
+Touched-file Python and TypeScript formatting checks passed. Remaining touched
+file lint diagnostics match the baseline: 24 Ruff errors in the backend registry,
+five Biome accessibility errors in the history table, and three existing Biome
+warnings across the history table and model settings. Whole-project formatting
+and compiler warnings described above remain; no lint rules were weakened.
+
+Twelve waveform, conditioning, chunking, cache, queue, and MLX lifecycle modules
+are byte-for-byte unchanged in this pass. Model weights, precision, sampling,
+audio processing algorithms, and normal generation defaults are unchanged.
+The added settings use existing database writes; no additional per-phrase
+inference, encoding, or checkpoint flush was introduced. The exact source
+fingerprint was refreshed because it also covers request and schema code;
+cross-revision exact resumes continue to fail closed. Existing audiobook files
+were not modified. A complete 13-hour book was not regenerated, so end-to-end
+generation time and listening quality were not newly benchmarked.
+
+A fresh main-workspace Bun audit returned no advisories. The installed Python
+audit still reports the Transformers and setuptools constraints described above;
+the pinned MLX toolchain was retained. The additional Transformers custom-generation
+cache issue documented by [CERT VU#456290](https://www.kb.cert.org/vuls/id/456290)
+was assessed against the application's fixed model allowlists. Those boundaries
+reduce exposure but do not remove the upstream dependency issues. Linux/Windows
+native runtime checks and full model-generation equivalence remain outside this
+macOS validation pass.

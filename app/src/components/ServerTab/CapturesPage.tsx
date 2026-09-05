@@ -11,10 +11,10 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AccessibilityNotice } from '@/components/AccessibilityGate/AccessibilityGate';
-import { InputMonitoringNotice } from '@/components/InputMonitoringGate/InputMonitoringGate';
 import { CapturePill, type PillState } from '@/components/CapturePill/CapturePill';
 import { DictationReadinessChecklist } from '@/components/CapturesTab/DictationReadinessChecklist';
 import { ChordPicker } from '@/components/ChordPicker/ChordPicker';
+import { InputMonitoringNotice } from '@/components/InputMonitoringGate/InputMonitoringGate';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -34,14 +34,14 @@ import {
 import { Toggle } from '@/components/ui/toggle';
 import { useToast } from '@/components/ui/use-toast';
 import { authenticatedFetch } from '@/lib/api/authenticatedFetch';
+import type { Qwen3ModelSize, VoiceProfileResponse, WhisperModelSize } from '@/lib/api/types';
 import { useDictationReadiness } from '@/lib/hooks/useDictationReadiness';
-import { useCaptureSettings } from '@/lib/hooks/useSettings';
 import { useProfiles } from '@/lib/hooks/useProfiles';
-import { usePlatform } from '@/platform/PlatformContext';
-import { useServerStore } from '@/stores/serverStore';
+import { useCaptureSettings } from '@/lib/hooks/useSettings';
 import { cn } from '@/lib/utils/cn';
 import { defaultChordKeys, displayLabelForKey, modifierSideHint } from '@/lib/utils/keyCodes';
-import type { Qwen3ModelSize, VoiceProfileResponse, WhisperModelSize } from '@/lib/api/types';
+import { usePlatform } from '@/platform/PlatformContext';
+import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 import { SettingRow, SettingSection } from './SettingRow';
 
 function ChordPreview({ keys }: { keys: string[] }) {
@@ -135,6 +135,8 @@ export function CapturesPage() {
   const { t } = useTranslation();
   const platform = usePlatform();
   const serverUrl = useServerStore((state) => state.serverUrl);
+  const connectionId = useServerStore((state) => state.connectionId);
+  const canOpenFolder = platform.metadata.isTauri && isLoopbackVoiceboxServerUrl(serverUrl);
   const { settings, update } = useCaptureSettings();
   const { data: profiles } = useProfiles();
   const { toast } = useToast();
@@ -157,17 +159,22 @@ export function CapturesPage() {
   const [capturesPath, setCapturesPath] = useState<string | null>(null);
 
   useEffect(() => {
-    authenticatedFetch(`${serverUrl}/health/filesystem`)
+    const controller = new AbortController();
+    setCapturesPath(null);
+    authenticatedFetch(`${serverUrl}/health/filesystem`, { signal: controller.signal })
       .then((res) => res.json())
       .then((data) => {
+        if (controller.signal.aborted || useServerStore.getState().connectionId !== connectionId)
+          return;
         const dir = data.directories?.find((d: { path: string }) => d.path.includes('captures'));
         if (dir?.path) setCapturesPath(dir.path);
       })
       .catch(() => {});
-  }, [serverUrl]);
+    return () => controller.abort();
+  }, [serverUrl, connectionId]);
 
   const openCapturesFolder = useCallback(async () => {
-    if (!capturesPath) return;
+    if (!canOpenFolder || !capturesPath) return;
     setOpening(true);
     try {
       await platform.filesystem.openPath(capturesPath);
@@ -176,7 +183,7 @@ export function CapturesPage() {
     } finally {
       setOpening(false);
     }
-  }, [platform, capturesPath]);
+  }, [platform, capturesPath, canOpenFolder]);
 
   const voices: VoiceProfileResponse[] = profiles ?? [];
   const defaultVoice = voices.find((v) => v.id === defaultVoiceId) ?? null;
@@ -566,7 +573,7 @@ export function CapturesPage() {
                 variant="outline"
                 size="sm"
                 onClick={openCapturesFolder}
-                disabled={opening || !capturesPath}
+                disabled={opening || !canOpenFolder || !capturesPath}
               >
                 <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
                 {t('settings.captures.storage.folder.open')}

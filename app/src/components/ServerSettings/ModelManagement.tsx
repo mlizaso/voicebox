@@ -45,7 +45,7 @@ import { apiClient } from '@/lib/api/client';
 import type { ActiveDownloadTask, HuggingFaceModelInfo, ModelStatus } from '@/lib/api/types';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { usePlatform } from '@/platform/PlatformContext';
-import { useServerStore } from '@/stores/serverStore';
+import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 
 async function fetchHuggingFaceModelInfo(repoId: string): Promise<HuggingFaceModelInfo> {
   const response = await fetch(`https://huggingface.co/api/models/${repoId}`);
@@ -131,6 +131,7 @@ export function ModelManagement() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const platform = usePlatform();
+  const serverUrl = useServerStore((state) => state.serverUrl);
   const customModelsDir = useServerStore((state) => state.customModelsDir);
   const setCustomModelsDir = useServerStore((state) => state.setCustomModelsDir);
   const [migrating, setMigrating] = useState(false);
@@ -451,7 +452,7 @@ export function ModelManagement() {
       </div>
 
       {/* Model storage location */}
-      {platform.metadata.isTauri && cacheDir && (
+      {platform.metadata.isTauri && isLoopbackVoiceboxServerUrl(serverUrl) && cacheDir && (
         <div className="shrink-0 pb-4 border-b mb-4">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">

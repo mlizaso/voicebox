@@ -14,6 +14,9 @@ from .utils.capture_chords import (
 
 MAX_GENERATION_SEED = (1 << 32) - 1
 PROFILE_SAMPLE_REFERENCE_TEXT_MAX_CHARS = 1000
+TRANSCRIPTION_LANGUAGE_PATTERN = "^(en|zh|ja|ko|de|fr|ru|pt|es|it)$"
+TRANSCRIPTION_MODEL_PATTERN = "^(base|small|medium|large|turbo)$"
+CAPTURE_LANGUAGE_PATTERN = "^(auto|en|zh|ja|ko|de|fr|ru|pt|es|it)$"
 
 
 class VoiceProfileCreate(BaseModel):
@@ -153,6 +156,9 @@ class GenerationResponse(BaseModel):
     instruct: str | None = None
     engine: str | None = "qwen"
     model_size: str | None = None
+    max_chunk_chars: int | None = None
+    crossfade_ms: int | None = None
+    normalize_audio: bool | None = None
     status: str = "completed"
     error: str | None = None
     is_favorited: bool = False
@@ -179,34 +185,10 @@ class HistoryQuery(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
-class HistoryResponse(BaseModel):
-    """Response model for history entry (includes profile name)."""
+class HistoryResponse(GenerationResponse):
+    """A generation history entry with its profile name."""
 
-    id: str
-    profile_id: str
     profile_name: str
-    text: str
-    language: str
-    audio_path: str | None = None
-    duration: float | None = None
-    seed: int | None = None
-    instruct: str | None = None
-    engine: str | None = "qwen"
-    model_size: str | None = None
-    status: str = "completed"
-    error: str | None = None
-    is_favorited: bool = False
-    exact_request_sha256: str | None = None
-    exact_envelope_sha256: str | None = None
-    exact_effects_json: str | None = None
-    exact_voice_snapshot_json: str | None = None
-    voice_binding_sha256: str | None = None
-    created_at: datetime
-    versions: list["GenerationVersionResponse"] | None = None
-    active_version_id: str | None = None
-
-    class Config:
-        from_attributes = True
 
 
 class HistoryListResponse(BaseModel):
@@ -219,8 +201,8 @@ class HistoryListResponse(BaseModel):
 class TranscriptionRequest(BaseModel):
     """Request model for audio transcription."""
 
-    language: str | None = Field(None, pattern="^(en|zh|ja|ko|de|fr|ru|pt|es|it)$")
-    model: str | None = Field(None, pattern="^(base|small|medium|large|turbo)$")
+    language: str | None = Field(None, pattern=TRANSCRIPTION_LANGUAGE_PATTERN)
+    model: str | None = Field(None, pattern=TRANSCRIPTION_MODEL_PATTERN)
 
 
 class TranscriptionResponse(BaseModel):
@@ -289,8 +271,8 @@ class CaptureRefineRequest(BaseModel):
 class CaptureRetranscribeRequest(BaseModel):
     """Request to re-run STT on a capture's audio with a different model."""
 
-    model: str | None = Field(None, pattern="^(base|small|medium|large|turbo)$")
-    language: str | None = Field(None, pattern="^(en|zh|ja|ko|de|fr|ru|pt|es|it)$")
+    model: str | None = Field(None, pattern=TRANSCRIPTION_MODEL_PATTERN)
+    language: str | None = Field(None, pattern=TRANSCRIPTION_LANGUAGE_PATTERN)
 
 
 class CaptureSettingsResponse(BaseModel):
@@ -317,7 +299,7 @@ class CaptureSettingsUpdate(BaseModel):
     """Partial update for capture settings — every field is optional."""
 
     stt_model: str | None = Field(default=None, pattern="^(base|small|medium|large|turbo)$")
-    language: str | None = None
+    language: str | None = Field(None, pattern=CAPTURE_LANGUAGE_PATTERN, max_length=4)
     auto_refine: bool | None = None
     llm_model: str | None = Field(default=None, pattern="^(0\\.6B|1\\.7B|4B)$")
     smart_cleanup: bool | None = None

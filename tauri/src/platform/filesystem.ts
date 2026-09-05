@@ -1,4 +1,5 @@
 import type { FileFilter, PlatformFilesystem } from '@/platform/types';
+import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 
 export const tauriFilesystem: PlatformFilesystem = {
   async saveFile(filename: string, blob: Blob, filters?: FileFilter[]) {
@@ -111,8 +112,12 @@ export const tauriFilesystem: PlatformFilesystem = {
   },
 
   async openPath(path: string) {
+    const connection = useServerStore.getState();
+    if (!isLoopbackVoiceboxServerUrl(connection.serverUrl)) {
+      throw new Error('Remote server directories cannot be opened on this computer');
+    }
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('open_directory', { path });
+    await invoke('open_directory', { path, connectionId: connection.connectionId });
   },
 
   async pickDirectory(title: string) {

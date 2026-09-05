@@ -501,7 +501,6 @@ def test_regenerate_discards_wav_when_version_creation_fails(
         _run(
             generation._save_regenerate(
                 generation_id="generation",
-                version_id=None,
                 audio=_audio(),
                 sample_rate=24_000,
                 db=db,

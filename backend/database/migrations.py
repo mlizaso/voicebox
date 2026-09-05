@@ -222,6 +222,15 @@ def _migrate_generations(engine, inspector, tables: set[str]) -> None:
     columns = _get_columns(inspector, "generations")
     if "model_size" not in columns:
         _add_column(engine, "generations", "model_size VARCHAR", "model_size")
+    # NULL records retain the legacy retry/regenerate defaults. New requests
+    # store their explicit settings so replay does not silently change audio.
+    for name, sql_type in (
+        ("max_chunk_chars", "INTEGER"),
+        ("crossfade_ms", "INTEGER"),
+        ("normalize_audio", "BOOLEAN"),
+    ):
+        if name not in columns:
+            _add_column(engine, "generations", f"{name} {sql_type}", name)
     if "is_favorited" not in columns:
         _add_column(engine, "generations", "is_favorited BOOLEAN DEFAULT 0", "is_favorited")
     if "source" not in columns:

@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import config, models
+from ..backends import resolve_tts_model_size
 from ..backends.mlx_tts_lifecycle import run_blocking_operation_cancellation_safe
 from ..database import Generation as DBGeneration, VoiceProfile as DBVoiceProfile, get_db
 from ..services import deletion_journal, effects_processing, history, personality, profiles
@@ -50,6 +51,26 @@ router = APIRouter()
 IMPORTED_AUDIO_PROFILE_NAME = "Imported Audio"
 IMPORT_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".webm"}
 IMPORT_AUDIO_MAX_BYTES = 200 * 1024 * 1024  # 200 MB
+
+
+def _request_model_size(data: models.GenerationRequest, engine: str) -> str | None:
+    try:
+        return resolve_tts_model_size(engine, data.model_size if "model_size" in data.model_fields_set else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _replay_model_size(generation: models.GenerationResponse) -> str | None:
+    if generation.engine == "import":
+        raise HTTPException(status_code=409, detail="Imported audio has no TTS request to retry or regenerate")
+    size = generation.model_size
+    # Older TADA rows accepted global Qwen sizes but actually loaded TADA 1B.
+    if generation.engine == "tada" and size not in {"1B", "3B"}:
+        size = None
+    try:
+        return resolve_tts_model_size(generation.engine or "qwen", size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def _enqueue_generation_or_restore(
@@ -264,15 +285,13 @@ async def _generate_speech_impl(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    from ..backends import engine_has_model_sizes
-
     engine = _resolve_generation_engine(data, profile)
     try:
         profiles.validate_profile_engine(profile, engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    model_size = (data.model_size or "1.7B") if engine_has_model_sizes(engine) else None
+    model_size = _request_model_size(data, engine)
     _require_tts_implementation_revision(data, engine=engine, model_size=model_size)
 
     voice_binding_sha256 = None
@@ -337,8 +356,11 @@ async def _generate_speech_impl(
         generation_id=generation_id,
         status="generating",
         engine=engine,
-        model_size=model_size if engine_has_model_sizes(engine) else None,
+        model_size=model_size,
         source=source,
+        max_chunk_chars=data.max_chunk_chars,
+        crossfade_ms=data.crossfade_ms,
+        normalize_audio=data.normalize,
         exact_request_sha256=exact_request_sha256,
         exact_envelope_sha256=exact_envelope_sha256,
         exact_effects_json=exact_effects_json,
@@ -650,7 +672,6 @@ async def generate_speech_batch_exact(
             status_code=422,
             detail="Exact pinned Qwen generation requires a cloned profile with reference audio",
         )
-    from ..backends import engine_has_model_sizes
     from ..utils.chunked_tts import split_text_into_chunks
 
     engines = [_resolve_generation_engine(request, profile) for request in requests]
@@ -659,17 +680,14 @@ async def generate_speech_batch_exact(
             profiles.validate_profile_engine(profile, engine)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        model_size = (request.model_size or "1.7B") if engine_has_model_sizes(engine) else None
+        model_size = _request_model_size(request, engine)
         _require_tts_implementation_revision(
             request,
             engine=engine,
             model_size=model_size,
         )
 
-    model_sizes = [
-        (request.model_size or "1.7B") if engine_has_model_sizes(engine) else None
-        for request, engine in zip(requests, engines, strict=True)
-    ]
+    model_sizes = [_request_model_size(request, engine) for request, engine in zip(requests, engines, strict=True)]
     common_contracts = {
         (
             request.profile_id,
@@ -741,6 +759,9 @@ async def generate_speech_batch_exact(
             "instruct": request.instruct,
             "engine": engine,
             "model_size": model_size,
+            "max_chunk_chars": request.max_chunk_chars,
+            "crossfade_ms": request.crossfade_ms,
+            "normalize_audio": request.normalize,
             "status": "generating",
             "source": "manual",
             "exact_request_sha256": exact_request_sha256,
@@ -893,6 +914,7 @@ async def retry_generation(generation_id: str, db: Session = Depends(get_db)):
     if (gen.status or "completed") != "failed":
         raise HTTPException(status_code=400, detail="Only failed generations can be retried")
 
+    model_size = _replay_model_size(gen)
     previous_error = gen.error
     # Keep any previously committed artifact owned until the replacement WAV
     # is durably published. Cancellation or a backend crash before that point
@@ -919,10 +941,13 @@ async def retry_generation(generation_id: str, db: Session = Depends(get_db)):
         text=accepted.text,
         language=accepted.language,
         engine=accepted.engine or "qwen",
-        model_size=accepted.model_size or "1.7B",
+        model_size=model_size,
         seed=accepted.seed,
         instruct=accepted.instruct,
         mode="retry",
+        max_chunk_chars=accepted.max_chunk_chars,
+        crossfade_ms=accepted.crossfade_ms,
+        normalize=accepted.normalize_audio if accepted.normalize_audio is not None else False,
     )
     await _enqueue_generation_or_restore(
         generation_id=generation_id,
@@ -961,6 +986,7 @@ async def regenerate_generation(generation_id: str, db: Session = Depends(get_db
     if (gen.status or "completed") != "completed":
         raise HTTPException(status_code=400, detail="Generation must be completed to regenerate")
 
+    model_size = _replay_model_size(gen)
     previous_error = gen.error
     accepted = await history.update_generation_status(
         generation_id,
@@ -978,19 +1004,19 @@ async def regenerate_generation(generation_id: str, db: Session = Depends(get_db
         text=accepted.text,
     )
 
-    version_id = str(uuid.uuid4())
-
     generation_coro = run_generation(
         generation_id=generation_id,
         profile_id=accepted.profile_id,
         text=accepted.text,
         language=accepted.language,
         engine=accepted.engine or "qwen",
-        model_size=accepted.model_size or "1.7B",
+        model_size=model_size,
         seed=accepted.seed,
         instruct=accepted.instruct,
         mode="regenerate",
-        version_id=version_id,
+        max_chunk_chars=accepted.max_chunk_chars,
+        crossfade_ms=accepted.crossfade_ms,
+        normalize=accepted.normalize_audio if accepted.normalize_audio is not None else True,
     )
     await _enqueue_generation_or_restore(
         generation_id=generation_id,
@@ -1173,7 +1199,7 @@ async def _stream_speech_impl(
         profiles.validate_profile_engine(profile, engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    model_size = data.model_size or "1.7B"
+    model_size = _request_model_size(data, engine)
     _require_tts_implementation_revision(data, engine=engine, model_size=model_size)
     if exact:
         try:
@@ -1434,7 +1460,9 @@ async def import_audio(
         published = True
 
         profile = _get_or_create_import_profile(db)
-        display_name = Path(file.filename or "Imported audio").stem or "Imported audio"
+        display_name = Path((file.filename or "").replace("\\", "/")).stem
+        display_name = "".join(character for character in display_name if character.isprintable())
+        display_name = display_name.encode("utf-8")[:255].decode("utf-8", errors="ignore").strip() or "Imported audio"
         stored_audio_path = config.to_storage_path(target)
         expected_generation_fields = {
             "id": generation_id,

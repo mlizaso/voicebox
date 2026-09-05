@@ -1,8 +1,8 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Mic, MoreHorizontal, Music, Play, RotateCcw, Trash2 } from 'lucide-react';
-import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ServerImage } from '@/components/ServerImage';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -40,7 +40,6 @@ export function StoryChatItem({
   const { t } = useTranslation();
   const seek = useStoryStore((state) => state.seek);
   const serverUrl = useServerStore((state) => state.serverUrl);
-  const [avatarError, setAvatarError] = useState(false);
 
   const avatarUrl = `${serverUrl}/profiles/${item.profile_id}/avatar`;
 
@@ -89,15 +88,15 @@ export function StoryChatItem({
         <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center overflow-hidden">
           {item.engine === 'import' ? (
             <Music className="h-5 w-5 text-muted-foreground" />
-          ) : !avatarError ? (
-            <img
+          ) : avatarUrl ? (
+            <ServerImage
               src={avatarUrl}
+              fallback={<Mic className="h-5 w-5 text-muted-foreground" />}
               alt={`${item.profile_name} avatar`}
               className={cn(
                 'h-full w-full object-cover transition-all duration-200',
                 !isCurrentlyPlaying && 'grayscale',
               )}
-              onError={() => setAvatarError(true)}
             />
           ) : (
             <Mic className="h-5 w-5 text-muted-foreground" />

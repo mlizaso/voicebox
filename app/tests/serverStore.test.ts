@@ -1,21 +1,6 @@
 import { beforeEach, expect, test } from 'bun:test';
 import { QueryObserver } from '@tanstack/react-query';
-
-const values = new Map<string, string>();
-globalThis.localStorage = {
-  getItem: (key) => values.get(key) ?? null,
-  setItem: (key, value) => {
-    values.set(key, value);
-  },
-  removeItem: (key) => {
-    values.delete(key);
-  },
-  clear: () => values.clear(),
-  key: (index) => [...values.keys()][index] ?? null,
-  get length() {
-    return values.size;
-  },
-};
+import { storedValues as values } from './setup';
 
 const { useServerStore } = await import('../src/stores/serverStore');
 const { queryClient } = await import('../src/lib/queryClient');
