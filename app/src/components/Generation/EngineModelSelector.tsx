@@ -11,6 +11,7 @@ import {
 import type { VoiceProfileResponse } from '@/lib/api/types';
 import { getLanguageOptionsForEngine } from '@/lib/constants/languages';
 import type { GenerationFormValues } from '@/lib/hooks/useGenerationForm';
+import { isFinetunedVoice } from '@/lib/utils/finetunedVoice';
 
 /**
  * Engine/model options and their display metadata.
@@ -47,6 +48,9 @@ const CLONING_ENGINES = new Set(['qwen', 'luxtts', 'chatterbox', 'chatterbox_tur
 
 function getAvailableOptions(selectedProfile?: VoiceProfileResponse | null) {
   if (!selectedProfile) return ENGINE_OPTIONS;
+  if (isFinetunedVoice(selectedProfile)) {
+    return ENGINE_OPTIONS.filter((opt) => opt.value === 'qwen_custom_voice:1.7B');
+  }
   return ENGINE_OPTIONS.filter((opt) => isProfileCompatibleWithEngine(selectedProfile, opt.engine));
 }
 

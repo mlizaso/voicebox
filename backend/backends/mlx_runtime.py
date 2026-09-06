@@ -57,9 +57,11 @@ MLX_QWEN_TTS_LOCAL_NUMERICAL_SOURCE_PATHS = (
     "backend/backends/mlx_backend.py",
     "backend/backends/mlx_qwen_optimizations.py",
     "backend/backends/mlx_tts_lifecycle.py",
+    "backend/backends/qwen_finetuned_backend.py",
     "backend/backends/qwen_llm_backend.py",
     "backend/services/exact_chunk_checkpoints.py",
     "backend/services/effects_processing.py",
+    "backend/services/finetuned_voices.py",
     "backend/services/generation.py",
     "backend/services/profiles.py",
     "backend/services/task_queue.py",
@@ -75,7 +77,7 @@ MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS: Mapping[str, str] = MappingProxyType
         # AST fingerprints ignore comments, whitespace, and source locations,
         # while changing whenever executable source structure changes.  CI
         # verifies these embedded values before PyInstaller removes sources.
-        "voicebox-mlx": "ab27489ba3f1963416659c3a1596d6be95e21b61106a67700cb44f361071d966",
+        "voicebox-mlx": "32b707d9b27dca0383a8ba773f49c2052208cbbedf5d847bc6c95fa5c61a0214",
         "mlx-audio-qwen3-tts": "ea2aaa5de132f381a1a817c8d4bd01c7fb00c431f1323606ef1f9b4394700a7e",
     }
 )

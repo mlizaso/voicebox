@@ -52,6 +52,48 @@ def _configure_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend_limit", "requested", "expected"), [(None, 800, 800), (200, 800, 200), (200, 120, 120)]
+)
+async def test_backend_input_bounds_preserve_text_seeds_and_caller_limits(
+    tmp_path, monkeypatch, backend_limit, requested, expected
+):
+    _configure_storage(tmp_path, monkeypatch)
+    calls = []
+
+    class Backend:
+        tts_operations_are_cancellable = True
+        max_input_chars = backend_limit
+
+        async def generate(self, text, _prompt, _language, seed, _instruct):
+            calls.append((text, seed))
+            return np.ones(2400, dtype=np.float32), 24000
+
+    text = "La estación estaba vacía, pero pronto llegaron los viajeros. " * 15
+    chunks = chunked_tts.split_text_into_chunks(text, expected)
+    audio, _rate = await chunked_tts.generate_chunked(Backend(), text, {}, seed=2**32 - 1, max_chunk_chars=requested)
+    try:
+        assert calls == [(chunk, (2**32 - 1 + index) % 2**32) for index, chunk in enumerate(chunks)]
+        assert " ".join(chunk for chunk, _seed in calls).split() == text.split()
+        assert all(len(chunk) <= expected for chunk, _seed in calls)
+    finally:
+        chunked_tts.release_disk_backed_audio(audio)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, True, 200.0])
+async def test_invalid_backend_input_bounds_fail_before_inference(limit):
+    class Backend:
+        max_input_chars = limit
+
+        async def generate(self, *_args):
+            pytest.fail("Invalid backend limits must be rejected before generating")
+
+    with pytest.raises(ValueError, match="Backend max_input_chars"):
+        await chunked_tts.generate_chunked(Backend(), "Una frase breve.", {})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("crossfade_ms", [0, 1, 50, 500])
 async def test_chunked_generation_disk_output_is_byte_identical_to_legacy(
     tmp_path: Path,

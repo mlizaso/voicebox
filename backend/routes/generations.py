@@ -1148,10 +1148,7 @@ async def _stream_speech_impl(
         engine_retries_runaway,
         ensure_model_cached_or_raise,
     )
-    from ..backends.mlx_tts_lifecycle import (
-        loaded_tts_backend_for_request,
-        run_tts_operation_cancellation_safe,
-    )
+    from ..backends.mlx_tts_lifecycle import run_tts_operation_cancellation_safe
     from ..utils.chunked_tts import (
         DeterministicSynthesisError,
         GeneratedAudioEmptyError,
@@ -1224,8 +1221,13 @@ async def _stream_speech_impl(
     async def _generate_stream_file():
         audio = None
         try:
-            await ensure_model_cached_or_raise(engine, model_size)
-            async with loaded_tts_backend_for_request(engine, model_size) as tts_model:
+            from ..services.finetuned_voices import is_finetuned_profile, loaded_backend_for_profile
+
+            if not is_finetuned_profile(profile):
+                await ensure_model_cached_or_raise(engine, model_size)
+            async with loaded_backend_for_profile(
+                engine, model_size, profile_id=data.profile_id, db=db, profile=profile
+            ) as tts_model:
                 if voice_binding_sha256 is not None:
                     try:
                         voice_prompt = await run_tts_operation_cancellation_safe(

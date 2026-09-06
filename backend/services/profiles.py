@@ -1323,8 +1323,11 @@ def _get_preset_voice_ids(engine: str) -> set[str]:
 
     if engine == "qwen_custom_voice":
         from ..backends.qwen_custom_voice_backend import QWEN_CUSTOM_VOICES
+        from .finetuned_voices import list_voices
 
-        return {voice_id for voice_id, _name, _gender, _lang, _desc in QWEN_CUSTOM_VOICES}
+        return {voice_id for voice_id, _name, _gender, _lang, _desc in QWEN_CUSTOM_VOICES} | {
+            voice["voice_id"] for voice in list_voices()
+        }
 
     return set()
 
@@ -1374,6 +1377,10 @@ def validate_profile_engine(profile, engine: str) -> None:
             raise ValueError(f"Preset profile {profile.id} is missing preset engine metadata")
         if preset_engine != engine:
             raise ValueError(f"Preset profile {profile.id} only supports engine '{preset_engine}', not '{engine}'")
+        from .finetuned_voices import is_finetuned_profile, read_voice
+
+        if is_finetuned_profile(profile):
+            read_voice(preset_voice_id)
         return
 
     if voice_type == "designed":

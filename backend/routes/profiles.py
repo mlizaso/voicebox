@@ -105,6 +105,7 @@ async def list_preset_voices(engine: str):
         }
     if engine == "qwen_custom_voice":
         from ..backends.qwen_custom_voice_backend import QWEN_CUSTOM_VOICES
+        from ..services.finetuned_voices import list_voices
 
         return {
             "engine": engine,
@@ -116,7 +117,8 @@ async def list_preset_voices(engine: str):
                     "language": lang,
                 }
                 for speaker_id, display_name, gender, lang, _desc in QWEN_CUSTOM_VOICES
-            ],
+            ]
+            + list_voices(),
         }
     return {"engine": engine, "voices": []}
 

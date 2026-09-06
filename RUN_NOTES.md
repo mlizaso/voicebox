@@ -657,3 +657,634 @@ never been under version control — its only safety net was the `<name>.bak-<re
 which is why several generations of `.bak-*` snapshots sit beside the sources. Since ~684 MB of the
 directory is generated research output, `.gitignore` ignores everything by default and names what
 to keep: 356 files, 4.4 MB, all code. The `.bak-*` snapshots stay on disk but out of history.
+
+---
+
+# Fabián fine-tuning run
+
+## Contract
+
+Create one dedicated Spanish narrator model from the user-specified recording
+and matching EPUB of *Los engranajes de Occidente*. Prepare accurate, bounded
+audio/text examples, train Qwen3-TTS 1.7B, evaluate unseen chapters and new prose,
+and expose the successful model through one Voicebox profile. Model weights,
+source text, audio and experiment manifests stay in the ignored
+`voice-profile/finetuning/` directory. Existing voices and audiobook jobs remain
+the baseline until the candidate passes quality and warm generation-time checks.
+
+Completion requires real training, a loadable checkpoint, intelligible sample
+generation and a comparison with the current voice. A prepared dataset or an
+unverified checkpoint is not a completed voice.
+
+## Initial evidence and decisions
+
+- Repository baseline: `8346274`; the main checkout was clean. The private
+  `voice-profile/build` repository has 58 existing changes; do not include them
+  in this work.
+- Runtime: macOS 26.6.2, Apple M2 Max, 64 GiB unified memory. Metal and PyTorch
+  MPS backward execution were verified outside the sandbox. No CUDA GPU.
+- Free disk at inspection: approximately 23 GiB. Do not delete existing user
+  files. Reuse available source weights and stream/chapter-bound audio reads.
+- Audio: 55,253.252 seconds, 44.1 kHz stereo AAC. Chapters 0 and 39 are credits
+  by another speaker and are excluded. Narration chapters are 1–38.
+- Existing Whisper word timestamps cover all narration chapters. They are
+  alignment candidates, not trusted training labels; compare against the actual
+  supplied EPUB and reject disagreements and uncertain boundaries.
+- Split by whole chapter before training. Keep validation and final test
+  material separate from training and reference conditioning.
+- Prefer checkpoint selection against held-out data over an arbitrary maximum
+  number of epochs. More training can overfit and does not guarantee improvement.
+- The official example assumes Flash Attention/CUDA. Its target indexing must
+  be checked against the installed Transformers loss and generation contract;
+  double label shifts must not enter this run.
+- Existing archived BF16 MLX base weights and tokenizer are available locally.
+  No paid compute or cloud upload has been authorized or used.
+
+## Verification baseline
+
+`backend/venv/bin/python -m pytest backend/tests/test_mlx_qwen_optimizations.py
+backend/tests/test_mlx_qwen_dtype_backport.py backend/tests/test_qwen_download.py
+-q`: **83 passed** with native Metal access. The initial sandbox run had five
+Metal-access failures; the native rerun passed all of them.
+
+## Current status
+
+Completed and installed as **Fabián — fine-tuned**. The selected update-926
+checkpoint passed all final held-out quality/speed gates. The real Voicebox API
+generated repeatable, independently verified Spanish speech with this profile.
+Existing voices and recordings are unchanged. See the final recovery handoff
+below for verification and the remaining subjective/UI-review limitations.
+
+## Continuation after the restart (2026-09-06)
+
+- Recovery commit: `8affd3c`, clean `feat/fabian-finetuning` branch. The recovered
+  corpus contains 4,750 candidates and codec caches. Independent clip verification,
+  the durable trainer, export, evaluation and profile installation still remain.
+- This is the native macOS checkout, not an AppTec appliance/container. AC power,
+  64 GiB memory and approximately 83 GiB free disk were confirmed. The old command
+  attempted a batch of eight long clips; that does not establish the restart cause.
+  Continue with one clip per GPU step, gradient accumulation and an explicit MPS
+  allocation cap. Do not run competing large GPU workloads.
+- Baseline: native `pytest backend/tests scripts/finetune_qwen -q` passed
+  **895 tests, 4 skipped**. The sandbox run aborted at Metal initialization.
+  `bun run ci` passed (26 frontend tests, boundary lint, TypeScript, both builds).
+  Whole-backend Ruff has 380 existing lint findings; formatting also has existing
+  debt. Use the repository's 120-column Python configuration for changed code.
+- Reuse the archived BF16 base at commit
+  `a6eb4f68e4b056f1215157bb696209bc82a6db48` and local Whisper medium at
+  `7fc08c4eac4c316526498f147dfdee6f6303f975`. Both are under the old
+  `.cache/_to_delete/huggingface/hub` cache; verify contents and bind checkpoints
+  to hashes. Source assets are private and remain ignored.
+- Work batches: (1) verify actual exported audio and validate cached codecs,
+  (2) implement/test atomic training resume and checkpoint selection, then train,
+  (3) merge adapters into a standalone BF16 CustomVoice checkpoint and evaluate
+  held-out material/new prose against the unchanged baseline, (4) expose a passing
+  model through one dedicated Voicebox profile and exercise real generation.
+- Select the fixed speaker reference from verified **training** material, so
+  validation/test chapters cannot leak through reference conditioning. Evaluate
+  validation throughout training; reserve final test examples for final evaluation.
+
+### Durable training implementation
+
+- Added an audited verified-corpus loader, bounded single-clip gradient
+  accumulation, deterministic epoch order, optimizer/RNG resume, validation-based
+  selection and early stopping. Resume and best weights each use two alternating
+  slots with an atomic hash-checked pointer; no base weights are duplicated in
+  optimizer checkpoints. Changed data, codecs, runtime or controlling code reject
+  exact resume instead of silently continuing a different experiment.
+- Added BF16 adapter merging and standalone CustomVoice export. The fixed speaker
+  is stored at codec embedding 3000, following Qwen's checkpoint layout. The export
+  must improve validation loss before it is emitted; generation quality is a
+  separate required gate.
+- The installed MLX CustomVoice path interleaves text/audio, while this trainer
+  uses the official non-streaming prefix. Integration must explicitly match that
+  prefix on the loaded local model. Using the unmodified MLX CustomVoice path
+  would create a train/inference mismatch.
+- Focused verification now covers crash-before-pointer publication, corrupted
+  checkpoints, exact optimizer continuation, split leakage, stale verification,
+  invalid codecs, and BF16 merging: 27 tests passed before integration work.
+
+### Local profile and evaluation integration
+
+- Kept the existing CustomVoice engine/profile schema. Operator-installed
+  `finetuned:` identifiers bind immutable, hash-checked local checkpoints; HTTP
+  callers cannot supply arbitrary filesystem model paths. Generation, synchronous
+  speech and streaming bind the local backend before any built-in model download.
+- Patched only the loaded local model's input preparation. An executed test with
+  identical tiny Torch/MLX weights confirmed the complete non-streaming prefix
+  matches the training tensor numerically. Existing model instances are unaffected.
+- The frontend restricts this profile to Spanish/1.7B, omits unsupported delivery
+  instructions and bypasses the built-in speaker download prompt. Native model
+  inference stays serialized by Voicebox's existing accelerator lifecycle guard.
+- Added reproducible paired evaluation: held-out passages and new prose,
+  independent generated-audio transcription, frozen base speaker-encoder cosine,
+  and warm processing/audio timing. Baseline reference reconstruction is tested
+  byte-for-byte against Voicebox's actual normalization and PCM WAV save path.
+  Quality/speed thresholds are fixed in advance, not adjusted after seeing scores.
+- Installation requires a complete passing final-test report for the exact export,
+  recomputes acceptance gates, verifies all artifact hashes and preserves every
+  existing profile. Repeated installation returns the same new profile.
+- Focused evaluation/installation tests: **26 passed**. Frontend `bun run ci`
+  passed again (26 tests, boundary lint, TypeScript and web/desktop builds).
+  Existing bundle-size/dynamic-import warnings remain; no checks were weakened.
+- The first full integration regression run found two expected stale source-
+  fingerprint failures (**936 passed, 4 skipped**). Added the new profile binding
+  and local model lifecycle owners to the fingerprint's explicit source coverage,
+  then refreshed the computed AST hash. The exact-generation revision changes;
+  frozen old jobs are not silently relabeled or allowed to mix runtime revisions.
+- After the fingerprint refresh, the complete native Python regression suite
+  passed: **938 passed, 4 skipped**. All changed Python files pass repository-
+  configured Ruff lint and format checks; changed frontend files pass Biome.
+  Real training and generated-audio acceptance are still outstanding at this point.
+- Final pre-training review expanded exact-resume code identity to include
+  `data.py` and `checkpoint.py`, which also control tensors/state. An added test
+  proves that changing the loader changes the experiment identity. No run had
+  started under the earlier two-file identity, so no training was invalidated.
+- Added a distinct original passage of more than 150 words to both validation
+  and final-test generation. This checks completion beyond the 3–18 second
+  training-clip range; no generated-audio scores had been seen when adding it.
+
+### Verified corpus and pilot start
+
+- Independent Whisper verification completed all **4,750** exported clips.
+  Accepted: **3,704 train / 8.6239 h**, **227 validation / 0.5345 h**,
+  **346 test / 0.8581 h**. The 473 transcript disagreements remain excluded.
+- Starting `voice-profile/finetuning/run-v1` from the complete audited corpus,
+  rank 64, learning rate 0.00002, accumulation 4, one clip in GPU memory, MPS
+  fraction 0.45. First pause at one optimizer update to exercise real checkpoint
+  recovery, then continue to a 100-update pilot and validation audio evaluation.
+  Independent verification has exited; no competing GPU process was started.
+- The one-update MPS pilot completed and paused cleanly. Baseline held-out loss
+  **2.78724 → 2.75423**; allocated tensors **5.23 GiB**, driver allocation
+  **10.31 GiB**. Read-back verified update 1 / position 4, all 462 optimizer
+  parameter states and both CPU/MPS RNG states. Resuming that same run to update
+  100 for the first real-audio validation comparison.
+- The pinned Transformers 4.57.3 emits a generic Mistral-regex warning for this
+  local Qwen config. Source inspection shows its non-Mistral skip is mistakenly
+  limited to configs at or below 4.57.2; this config is `qwen3_tts`/4.57.3 and uses
+  `Qwen2Tokenizer`. Neither training nor MLX inference applies that Mistral patch.
+  Do not change Qwen tokenization to silence it. Optional SoX/Flash-Attention
+  import warnings are not failures; the exercised local path uses SoundFile/mel
+  processing and MPS/SDPA successfully.
+- The first real resume exposed a defect that CPU optimizer tests had not
+  covered: installing FP32 adapters makes Hugging Face's generic `model.dtype`
+  report float32 (its first parameter), while the frozen embeddings remain BF16.
+  Resume converted the saved BF16 speaker to that incorrect generic dtype,
+  promoting the prefix and triggering a native mixed-dtype Metal assertion.
+  The process aborted; the laptop and durable update-1 checkpoint were intact.
+- Reproduced the dtype change on the actual base without GPU work. Added a
+  BF16/FP32 mixed-model regression, restore against the actual audio-embedding
+  weight dtype, and an early descriptive rejection for mismatched prefixes.
+  Because controlling code changed, preserve `run-v1` unchanged and restart
+  the one-update/recovery pilot in **`run-v2`**, not by editing its contract.
+- `run-v2` reproduced both the original baseline and first-update validation
+  losses exactly. Its real native resume then passed updates 5 and 10 without
+  the Metal assertion, at about 4 seconds/update and 10–11 GiB driver allocation.
+  Continuing to update 100 before the first real-audio comparison.
+- The resumed pilot reached update **100 / 400 training clips** and paused
+  successfully. Validation: total **2.39871**, main **1.06874**, residual
+  **4.43324**, versus baseline 2.78724 / 1.36157 / 4.75222. Resume training took
+  about 455 seconds plus final validation/checkpoint writes. Proceeding to
+  `fabian-pilot` export and validation-only audio evaluation; final test remains
+  untouched for model selection.
+- The standalone `fabian-pilot` model loaded and generated all 16 validation
+  cases, including 57.68 seconds of continuous original prose. Independent
+  Whisper evaluation passed all predeclared gates: candidate WER **1.149%**
+  versus baseline **0.575%**; worst candidate WER **14.286%** on one held-out passage;
+  mean base-encoder speaker cosine **0.98845 vs 0.98495**; median warm processing
+  ratio **0.57578 vs 0.61766**; no token-limit hits. These are automated metrics,
+  not a human listening review or a claim of improved perceived voice quality.
+- Continuing `run-v2` from update 100 with its original three-epoch ceiling and
+  validation-patience rule. The 100-update export and comparison are preserved.
+  The final test corpus has not been used to tune or choose this candidate.
+- Detailed inspection of the pilot's independent transcript found that all six
+  candidate word errors came from an omitted ending in `ch25_00009` (42 words).
+  Passing the five aggregate gates was therefore insufficient for promotion.
+  Added a **stricter sixth gate**, requiring the final three normalized words of
+  every prompt in its actual transcript. This catches premature EOS separately
+  from a maximum-token truncation. Preserve the original pilot report as evidence;
+  it is not installable under the strengthened acceptance rules. Re-evaluate the
+  final trained candidate on validation, including this passage, before final test.
+- Subsequent validation improved to **2.36212 at update 200** and **2.33527 at
+  update 300**. The long worker gradually slowed from about 4–5 seconds/update
+  to about 10–14, while allocations stayed bounded and macOS reported no recorded
+  thermal/performance warning or competing model worker. About 1.3 GiB swap and
+  68 GiB free disk were observed; power remained AC.
+- Requested a graceful SIGTERM only for the owned worker. It finished and saved
+  **update 387 / position 1548**, then exited cleanly. Restarting the exact same
+  `run-v2` command tests whether releasing accumulated native process state
+  restores throughput; no hyperparameters, data, weights or contract were edited.
+- The update-387 checkpoint resumed successfully; initial throughput improved
+  to around 7–8 seconds/update, then varied around 8–10. Validation improved to
+  **2.32822 at update 400**. A read-only Darwin scheduling check returned normal
+  priority (0), so no process priorities or machine power settings were changed.
+- Full native regression after the resume and ending fixes: **943 passed,
+  4 skipped**, in 148 seconds while training was active. Skips are two Python
+  3.13-only audio compatibility cases (this environment is Python 3.12), a Windows
+  ROCm E2E case, and an opt-in heavy ROCm install. All 29 touched Python files
+  passed the repository-configured lint and formatting checks.
+- Validation improved again to **2.31621 at update 500**. The next full native
+  regression, run concurrently with training and frontend builds, completed
+  **942 passed / 1 failed / 4 skipped**: the unchanged
+  `test_nonpositive_chunk_size_fails_promptly` exceeded its 10-second subprocess
+  limit. An isolated pytest retry during training also timed out. A direct timed
+  import subsequently took **6.63 seconds**, then the invalid-size call correctly
+  raised `ValueError`. No test limit or assertion was changed; rerun the full
+  checks without competing training/build work before final acceptance.
+- The repeated frontend CI passed all 26 tests, boundary/type checks and both
+  builds. Ruff lint/format passed all **28** changed Python files from the
+  pre-fine-tuning base; the earlier 29-file note was a counting error. Diff
+  whitespace checks and the scan for newly skipped/disabled tests, suppression
+  markers and unfinished placeholders are clean.
+- Training completed its first full epoch at **update 926**. Selected validation
+  loss progressed through **2.30770 (600), 2.30365 (700), 2.29393 (800),
+  2.28352 (900), 2.28145 (926)**. The original three-epoch ceiling and patience
+  rule remain unchanged. Throughput recovered to roughly 5–7 seconds/update
+  without another restart or changes to machine settings; allocations remain
+  bounded. Final audio evaluation and installation are still pending.
+- The full training run **finished normally at update 1,200**, exit 0. Three
+  consecutive validation checks did not improve the selected loss by 0.001:
+  **2.28322 (1,000), 2.28552 (1,100), 2.28149 (1,200)**. The immutable selected
+  checkpoint is therefore **update 926 / loss 2.28144715**, versus baseline
+  2.78724186. No ceiling, patience, hyperparameter or acceptance gate was relaxed.
+  Exported this selected checkpoint as private standalone **`fabian-v1`**.
+- The selected model's full validation-audio check **failed**; it is not installed.
+  Candidate WER **4.215%**, worst **26.190%**, versus baseline **0.575%**. All 22
+  candidate word errors were suffix omissions in `ch08_00069` and `ch25_00009`;
+  the other 14 passages, including 56.08 seconds of original prose, transcribed
+  correctly. Speaker cosine and measured warm speed passed; final test remains
+  unused. Preserve `evaluation-trained-validation` unchanged as failed evidence.
+- Testing a bounded validation-only decoding probe at temperatures **0.7 and
+  0.0**, using the same two failed texts/seeds and long validation prose. Greedy
+  decoding (0.0) hit every duration limit and is rejected. The installed MLX
+  sampler restores EOS after top-k filtering; a separate observational probe
+  will check the actual failed EOS ranks before attributing the defect to that
+  behavior. No weights, training contract, acceptance limits or tests were weakened.
+- The observational decoder probe **disconfirmed** the EOS-filter explanation:
+  EOS was already rank 1 at both failed stops. Temperature 0.7 still omitted an
+  ending; temperature 0.0 generated unintelligible duration-limited output.
+  Neither decoding alternative is promoted.
+- A separate probe reused Voicebox's existing clause-aware splitter at **200
+  characters**, original temperature 0.9 and deterministic offset seeds. Both
+  failed endings and the long prose completed; the three whole WAVs had WER
+  **4.545%, 2.381%, 0.578%**, with no duration-limit hits. Integrated this bounded
+  policy only for local fine-tuned profiles through the shared generation path;
+  ordinary engines retain their previous limits and callers may request smaller
+  chunks. Unbounded direct backend calls now reject before inference.
+- New tests reproduced the missing cap before the fix, then passed. Focused
+  regression is **53 passed**. The evaluator now exercises the real bounded
+  backend and disk-backed chunk assembly, propagates duration-limit errors,
+  and reports no fabricated aggregate token count. The installer additionally
+  binds reports to evaluator and inference source hashes. Refreshed the actual
+  numerical source fingerprint; old frozen jobs are not relabeled.
+- With training/inference stopped, two consecutive complete native regression
+  passes succeeded: **954 passed / 4 unchanged skips**, in **37.71 s** and
+  **30.11 s**. The earlier unchanged import-timeout test passed both times;
+  no timeout or assertion was changed. Ruff lint/format pass all **30** Python
+  files changed since the pre-fine-tuning base.
+- Full bounded validation exposed an MLX worker-thread error at warmup, before
+  producing any evaluated candidate audio. The loaded model retained lazy arrays
+  on a thread-local stream unavailable to `asyncio.to_thread`. A tiny native
+  regression reproduced the same failure, independently of the large model.
+  The local loader now creates a cross-thread stream; inference uses that same
+  stream under the existing global lifecycle guard and synchronizes before
+  releasing ownership, including on failure. This follows the installed MLX
+  API's explicit requirement for serialized evaluation; no packages or compiler
+  settings were changed. The test also retains lazy state between separate
+  executor lifetimes. Focused regression: **35 passed**. Preserve the failed
+  `evaluation-bounded-validation` directory and use a new identity-bound
+  `evaluation-threaded-validation` run with unchanged weights and gates.
+- Stream-fix verification: two consecutive full native passes **955 passed /
+  4 unchanged skips**, **30.46 s / 27.14 s**; all touched Python lint/format
+  checks pass. Frontend CI again passed **26 tests**, boundary checks, all type
+  checks and both builds. Existing bundle-size warnings remain informational.
+- The repaired full-model worker reached inference but hit a duration limit on
+  `ch08_00024`. A second tiny native test isolated the cause: MLX 0.32's RNG
+  state is thread-local, while mlx-lm's compiled categorical sampler captures
+  the importing thread's list. In another worker it repeated the same draw
+  **32 times** instead of advancing the requested seed. The local model now
+  binds a private copy of Qwen's sampling method to a compiled categorical
+  function with explicit request-local keys. The key splitting sequence matches
+  upstream's valid single-thread implementation exactly. No global method,
+  filtering rule, temperature, duration limit, test threshold or weights changed.
+  The new regression failed before the fix, then exact token-array parity
+  passed across two executor lifetimes; a different seed produces different
+  output. Focused regression is **36 passed**. Preserve the failed threaded
+  output and re-evaluate under a fresh source identity.
+- Seed-fix full regression: **956 passed / 4 unchanged skips** twice, in
+  **31.82 s / 29.57 s**. Native sampler tests additionally verify the upstream
+  method and its global categorical function were not modified. Touched Python
+  lint/format and diff checks pass; frontend sources are unchanged since the
+  immediately preceding successful complete frontend CI run.
+- Full repaired-path validation **passed all six gates** on 16 paired passages
+  and their 32 independent Whisper transcripts. Candidate WER **0.766%** (worst
+  **4.545%**) versus baseline **0.575%**; speaker cosine **0.98892 / 0.98495**;
+  median warm processing/audio ratio **0.44257 / 0.57958**. No missing endings or
+  duration-limit hits. The 59.35-second new-prose sample completed. These are
+  automated metrics, not a listening review. Proceed to the previously untouched
+  final test selection with exactly these weights, code, seeds and settings.
+- The untouched final test comparison **passed all six gates** on chapters 12
+  and 30 plus four new prose passages (16 paired cases / 32 WAVs). Candidate
+  WER **0.734%**, worst **2.151%**, versus baseline **0.550%**; speaker cosine
+  **0.98896 / 0.98401**; median warm processing/audio ratio **0.45146 / 0.59557**
+  (about 24% lower). No missing endings or duration-limit hits; the longest new
+  prose generated **62.42 s**. No final-test feedback was used to change the
+  checkpoint, runtime, settings or acceptance gates.
+- Before installation, saved a private SQLite backup and checked `quick_check`
+  (`ok`). Recorded canonical row hashes for all **15 existing profiles** and
+  **32 sample records**, plus the ordered sample-file hashes, in private
+  `before-install.json`. Installation must add one new profile and preserve all
+  those original rows and recordings.
+
+### Final recovery handoff
+
+- Installed profile **`ecf402ed-3f23-4326-8651-035d1d5f54dc`**, preset
+  **`finetuned:fabian`**, name **Fabián — fine-tuned**, bound to the unchanged
+  private **`fabian-v1`** export. The installer independently revalidated the
+  complete final report and artifact hashes before registration.
+- The database now has **16 profiles / 32 samples**, and `quick_check` is `ok`.
+  All 15 original profile rows, all 32 sample rows and all 32 audio files match
+  their pre-installation checksums exactly. The private database backup remains
+  available. Normal backend startup reclaimed one completed/orphaned temporary
+  exact-voice snapshot; original recordings and saved audiobook jobs were not
+  changed by this work.
+- Restored the source API at **http://127.0.0.1:17493** and the browser interface
+  at **http://127.0.0.1:5173**. Health, profile lookup and HTML serving returned
+  successful responses. Browser automation could not connect: no browser was
+  available, native UI startup failed, and the in-app browser was unavailable.
+  Do not claim that the browser controls were clicked or visually reviewed.
+- Exercised real `/generate` twice with the installed profile, new 304-character
+  Spanish prose, seed **314159**, and normal output processing. Both requests
+  completed two bounded chunks, returned **20.99 s / 24 kHz / mono** audio,
+  and produced **byte-identical WAVs**. Independent Whisper transcription was
+  **55/55 words correct**, including the complete ending. The sample and its
+  verification report are private `app-smoke.wav` and
+  `app-smoke-verification.json`; both entries remain in app history.
+- This is automated speech, identity-proxy, timing and runtime verification,
+  not a human listening review or a promise of better subjective voice quality.
+  The 200-character inference windows are a deliberate validation-backed
+  reliability choice. No cloud compute, uploads, pushes or publication occurred.
+- Preserve the completed training checkpoints, immutable export, failed
+  diagnostic reports, successful validation/final-test audio and the database
+  backup. Only the three disposable sampling-probe scripts created under this
+  task's `/tmp` scratch directory are removed; their private result artifacts
+  remain available.
+- Final two consecutive native regressions: **956 passed / 4 unchanged skips**
+  in **29.37 s / 27.33 s**. Final frontend CI: **26 passed**, boundary/type
+  checks and web/desktop frontend builds passed; only the previously recorded
+  bundle warnings remain. Ruff lint/format pass all **30** changed Python files;
+  Biome passes all **4** changed frontend files; full diff whitespace and
+  newly-added placeholder/suppression/skip scans are clean. Platform/opt-in skips
+  remain the two Python 3.13 checks, Windows ROCm E2E and heavy ROCm install.
+- No training, evaluation or ASR worker remains active. The source app remains
+  listening only on loopback, API **17493** / UI **5173**, with the new voice
+  verified warm. Work is saved in local commits on **`feat/fabian-finetuning`**;
+  no push or release was performed. The completion record follows the
+  fully-implement workflow's executed validation and durable local-commit gates.
+
+## Sísifo continuation — 2026-09-06
+
+### Contract and batches
+
+- Continue the completed Fabián model using the user's 30 M4B recordings of
+  *El despertar de Sísifo (2021–2022)*, without assuming every voice is his.
+  Preserve source audio, the installed `fabian-v1`, its checkpoints, existing
+  profiles, and the unrelated dirty private `voice-profile/build` repository.
+- In scope: source-bound episode preparation, conservative announcer exclusion,
+  reference-based speaker filtering with explicit negative controls, independent
+  verification of actual cut WAVs, a new parent-checkpoint training experiment,
+  and paired evaluation against v1 before any separate profile installation.
+  No cloud compute, audio uploads, paid services, pushes or publication.
+- Existing large-v3-turbo word timestamps are useful hypotheses, not verified
+  labels: they reference an older location and were not bound to these source
+  bytes. Match Unicode-normalized filenames, verify durations, hash all inputs,
+  and require independent Whisper-medium word agreement. Do not describe this
+  corpus as EPUB-aligned; there is no source EPUB for these episodes.
+- Reserve whole episodes 6 and 24 for validation, 11 and 28 for final test,
+  before speaker reference selection or training. Keep original book splits
+  unchanged. Use verified original training material for rehearsal and retain
+  the parent speaker embedding. New final prose must not reuse v1's final set.
+- Batches: (1) verified speaker-aware corpus preparation, (2) explicit immutable
+  parent warm-start and paired local-model evaluation, (3) bounded native
+  training, evaluation and conditional separate installation, (4) two complete
+  regression passes and durable local commits. An improved validation loss is
+  not sufficient for promotion; keep the six existing speech-quality gates.
+- Native macOS runtime reconfirmed. Baseline: **956 passed / 4 existing skips**,
+  frontend **26 passed**, boundary/type checks and both frontend builds pass;
+  only existing bundle warnings. Fine-tuning Ruff lint passes. Disk has 36 GiB
+  free; GPU jobs must run sequentially with the existing allocation cap.
+
+### Speaker-aware preparation
+
+- Reused the local frozen Qwen ECAPA encoder without loading the talker or
+  adding dependencies. The CPU-only real-audio probe took 15.5 seconds.
+  Across the first three episodes, all 12 announcer controls had negative
+  target-versus-announcer margins; narrator checks were positive. Existing
+  narrator references passed leave-one-recording-out margin checks (minimum
+  0.02055). Preserve the private probe report; these are identity proxies.
+- Fixed conservative cutoffs **target cosine >=0.97**, **margin >=0.015** on
+  both the complete clip and every overlapping 3-second / 1.5-second-stride
+  window. The absolute cutoff intentionally rejects some real narrator clips.
+  Only training episodes provide references or calibration controls; no final
+  test feedback sets thresholds. Constant source-level headroom avoids AAC
+  floating-point overshoots; no denoising, compression or pitch changes.
+- All 30 current M4B durations exactly match their timestamp metadata. Source
+  and transcript hashes now bind those hypotheses to this folder. The new
+  `sisifo-corpus-v1` preparation is restartable per candidate/episode, and keeps
+  rejected-speaker metadata. First seven episodes retain **247 / 521** bounded
+  candidates; low-confidence ASR and quiet-boundary checks have already excluded
+  other material before this count. These are not yet independently verified
+  training examples.
+- Preparation completed in **365.3 seconds** across all 30 episodes: **1,333
+  training clips / 2.67904 h**, **74 validation / 0.14990 h**, **73 test /
+  0.14187 h**. Another **968** bounded candidates failed speaker screening and
+  **2** crossed wrapper boundaries. Exact word verification is running on the
+  1,480 exported WAVs; no unverified label has entered training.
+- Preparation batch saved as local commit **`bb9beb5`**. Complete native
+  regression: **974 passed / 4 unchanged skips**; Ruff lint/format and diff
+  whitespace checks pass. No frontend source changes since its green CI run.
+- Continuation design: inherit v1's selected update **926** adapters and fixed
+  speaker into a **new** experiment, with a fresh AdamW optimizer and new
+  held-out baseline. Validate parent base/rank/hash/contract/completion and
+  retain the exact original reference. Source-qualified validation sampling
+  remains balanced, including when chapter numbers coincide. Compose only
+  already-verified clips; original and new held-out groups stay disjoint.
+- Warm-start/rehearsal batch saved as **`eff996c`**, with **980 passed / 4
+  unchanged skips**. The original reference wins over identically numbered
+  new episodes. Source preparation, checkpoint recovery and current v1 files
+  remain unchanged.
+- Actual read-only baseline resolution exposed a wrong table name in the new
+  evaluator (`voice_profiles` versus the real ORM's `profiles`). Replaced the
+  hand-written test schema with `VoiceProfile.__table__`; it reproduced the
+  failure before fixing the query. This is why unit-green alone is not used as
+  completion evidence. No database write was made by the failed lookup.
+- Predeclared separate validation/final evaluation configs before training:
+  four fresh Spanish passages per split, including **198 / 202 word** long
+  narration. Baseline profile is the installed **Fabián — fine-tuned** v1,
+  not the older zero-shot clone. Use the identical bounded runtime and seeds
+  for both; keep the six original acceptance gates unchanged.
+- Fixed evaluator verification: **982 passed / 4 unchanged skips**, including
+  the ORM-backed profile lookup regression; Ruff lint/format and diff checks
+  pass. A real read-only lookup and full model-file hash validation resolve
+  `finetuned:fabian` to the unchanged `fabian-v1` export.
+- Real-audio mixed-speaker challenge: a clean narrator clip passed; inserting
+  **1.5 seconds** or **3 seconds** of the announcer caused rejection. In the
+  1.5-second case the full-clip score alone still passed, but an overlapping
+  window's margin fell to **0.00457**, below the fixed 0.015 threshold. This
+  supports the window rule; it is not a guarantee of perfect diarization.
+- Evaluation changes saved as local commit **`959a811`**. The complete actual
+  1,480-WAV audit passed: finite mono 24 kHz, exact durations, source-bound
+  text/audio hashes, wrapper exclusions and every speaker window rechecked;
+  maximum peak **0.90000004** (floating-point roundoff). All 30 source M4Bs
+  and timestamp JSONs remain byte-identical to the preparation inventory.
+- Independent Whisper-medium verification finished: **1,169 train / 2.32649 h**,
+  **67 validation / 0.13474 h**, **61 test / 0.12056 h**. **183 / 1,480** clips
+  were rejected for non-exact normalized word agreement. Their metadata remains
+  available; do not promote them by editing labels or acceptance flags.
+- Codec preparation is running sequentially after ASR. Next compose
+  `sisifo-mixed-v1` with all accepted new clips plus **600** deterministic
+  original training clips (and original held-outs), preserving `ch04_00077`.
+  Planned new run: `sisifo-run-v1`, original base, `--init-run run-v2`, rank 64,
+  learning rate **1e-5**, accumulation 4, at most 3 epochs, validation every
+  100 updates / 64 source-balanced clips, patience 3, MPS fraction 0.45.
+  No parent optimizer or old validation counters are inherited.
+- Codec extraction completed in **about 52 seconds**. Real composition passed the
+  complete audio/text/speaker/codec audit: **1,769 train / 3.750275 h**,
+  **294 validation / 0.669269 h**, **407 test / 0.978629 h**; corpus identity
+  `1588ea6f34333a6c8425e4bf41c4b28c2109fe4f907e93596f853bde8fa3ad1a`.
+  All 26 training episodes contribute independently verified clips.
+- Started the full native continuation at **12:29 UTC**, shell session **40443**,
+  with the planned command and no artificial update limit. Parent update 926
+  loaded successfully. Its new mixed-validation baseline is **2.43565202**;
+  first updates are finite, approximately 4–7 seconds each, with **~5.0 GiB**
+  allocated / **~9.8 GiB** driver memory after warm-up. Current disk free is
+  **33 GiB**. The first crash-safe baseline checkpoint is committed on disk.
+- Before the first rotated recovery save, compared the new step-0 snapshot
+  directly with the selected parent: **all 462 adapter tensors and the speaker
+  match exactly**, and AdamW's state is empty. Training subsequently reached
+  update **50** with finite gradients/losses and normal checkpoint rotation.
+  This is an in-progress run, not a completed or promoted voice.
+- After training genuinely completes, export its selected checkpoint to the
+  new private `fabian-sisifo-v2` directory, run the predeclared
+  `sisifo-evaluation-validation-config.json`, then the final test config only
+  after validation passes. Compare to installed v1, do not weaken gates or use
+  final-test feedback to select the checkpoint. Only a passing candidate may
+  be installed under a separate voice identifier. Finish with real application
+  generation and two complete regression passes; keep all prior artifacts.
+- The first complete training pass finished at update **443**, covering all
+  **1,769** clips. Validation losses: start **2.43565202**, update 100
+  **2.39981806**, 200 **2.38838900**, 300 **2.38080665**, 400 **2.37874837**,
+  first-pass end **2.37812390**. Update **400** remains selected: the last
+  reduction is below the fixed 0.001 selection threshold (one stale check).
+  Training continues under the unchanged patience/epoch limits. Selected
+  checkpoint hash verification passed; disk free remains approximately 31 GiB.
+- Training **completed normally at update 600**, after three checks without
+  meaningful improvement (443, 500, 600). Final selected snapshot is update
+  **400**, loss **2.37874837** versus inherited-model baseline **2.43565202**
+  on the new mixed validation set (about **2.34%** lower). Final update 600
+  scored 2.38114139 and was not selected. No gates, seed, learning rate,
+  patience or dataset were changed after starting the experiment.
+- Exported the selected snapshot successfully to the new standalone private
+  **`fabian-sisifo-v2`** BF16 model. Parent `fabian-v1`, original run-v2 and
+  all new recovery checkpoints are preserved. Paired validation generation
+  against installed v1 is starting; the new candidate is **not yet installed**.
+- Update-400 paired validation **failed complete endings**, while the other
+  five gates passed. Candidate WER **0.860%**, worst **9.375%**, cosine
+  **0.983637**, median RTF **0.406637**; v1 WER **0.491%**, cosine **0.988573**,
+  RTF **0.407595**. The 197-character `sisifo_ch06_00084` dropped/replaced its
+  final phrase. Both cached Whisper-medium and Whisper-small failed to recover
+  the ending on full audio and isolated tails. Preserve this failed export,
+  report and diagnostic; no installation or final-test inference occurred.
+- Next validation-stage candidate: retained earlier best **update 300**
+  (loss **2.38080665**), exported separately as `fabian-sisifo-v2-step300`.
+  Added a tested explicit retained-step export option: require a completed run,
+  match its contract and selected step, hash the snapshot, never rewrite either
+  checkpoint pointer. Reject nonfinite validation metrics. New configs preserve
+  every validation/final passage, seed, baseline and gate; only candidate/output
+  paths differ. This is audio-based validation selection, not final-test tuning.
+- Update-300 greedy-ASR validation initially failed with **15.23%** aggregate
+  WER: one 8.56-second clip produced over 100 repeated words and timestamps
+  reaching 14.38 seconds (compression ratio **5.912**). Independent small-model
+  full/tail decoding and medium-model tail decoding all recover the correct
+  ending; full medium decoding without timestamps does too. In contrast, the
+  real update-400 missing ending remains wrong in timestamp-free decoding.
+- Fixed the measurement failure, not the quality gates: empty or repetitive
+  ASR (Whisper's existing **2.4** compression cutoff, including nonfinite
+  values) gets exactly one greedy timestamp-free retry on the same full audio,
+  without expected-text hints. Preserve both attempts and block unresolved
+  failures. Wrong words/endings never trigger retries. Tests were added before
+  implementation and first failed on the missing helper. New comparisons use
+  `sisifo-step300-asr2-*`; prior failed reports remain unchanged. Model, speech
+  inference, passages, seeds, six thresholds and the untouched final set stay
+  fixed. Code-bound cache checks require fresh paired generation after this
+  evaluator change.
+- ASR safeguard batch verified: **994 passed / 4 unchanged skips**, frontend
+  **26 passed**, boundary/type checks and web/desktop frontend builds pass;
+  Ruff lint/format and diff checks pass. This includes preserved failed-ASR
+  evidence, stale policy-cache rejection and unchanged ending rejection.
+- Fresh step-300 validation passes **all six unchanged gates**: candidate
+  WER **0.2457%**, worst **4.545%**, mean cosine **0.986388**, median RTF
+  **0.405481**, no missing endings or token-limit hits. Baseline v1: WER
+  **0.4914%**, cosine **0.988573**, RTF **0.406873**. All 28 regenerated
+  candidate waveforms are sample-identical to the original step-300 run;
+  FLOAT WAV file hashes differ only because libsndfile stamps the PEAK
+  chunk's creation time. Starting the predeclared final test now, with this
+  checkpoint, inference implementation, ASR policy and all settings frozen.
+- Initial step-300 final report: five gates pass, ending gate fails on
+  `sisifo_ch11_00025`. Medium ASR adds "de la humanidad" after a 6.4-second
+  utterance; aggregate WER **0.4848%** versus v1 **0.7273%**, cosine
+  **0.987517** versus **0.988882**, RTF **0.408204** versus **0.408020**.
+  No model change, installation or test-driven checkpoint reselection occurred.
+- Further measurement evidence: small ASR reads the exact full sentence and
+  tail. Medium ASR alternates invented "de la vida"/"de la humanidad" endings;
+  its cropped-tail output assigns the extra phrase to seconds **4–8** of only
+  **3.9 seconds** of input. Downloaded the 1.61 GB public MLX large-v3-turbo
+  verifier locally, pinned revision `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb`;
+  it independently reads the exact requested ending. It also reproduces the
+  genuinely wrong update-400 ending, supporting the distinction. No audio upload.
+- Before running complete additional comparisons, require **both** small and
+  large verifiers to pass all six unchanged gates on the entire validation
+  **and** final sets. Keep the initial medium reports and diagnostics unchanged;
+  do not substitute just one favorable transcript. Added identity-bound
+  `crosscheck.py` to rescore all existing paired WAVs using the same scorer,
+  preserve the original, match the upstream weights-file selection, and verify
+  original/recognizer/code provenance again at installation. Failure of either
+  independent full comparison prevents installation. The generation model,
+  exact audio, prompts, seeds and six gate definitions remain unchanged.
+- Cross-check tooling verification: **998 passed / 4 unchanged skips**;
+  frontend 26 tests, boundary/type checks and both frontend builds pass. Ruff
+  lint/format and diff checks pass. Starting all four independent comparisons.
+- All four cross-checks completed; the added acceptance requirement **did not
+  pass**. Small: validation WER **0.4914%**, one ending disagreement; test
+  **0.9697%**, two ending disagreements. Large: validation **0.2457%**, all
+  gates pass; test **0.3636%**, one ending/25%-worst-WER failure caused by
+  joining "Res gestae" as "ResGestae". Small disagreements include
+  "coetáneo"/"coetanio", "complots"/"con plots", "inundan"/"inunda".
+  Both additional models recover the disputed medium-ASR added-phrase ending.
+- **No promotion or installation.** Do not weaken gates, swap favorable
+  per-clip transcripts, or keep selecting checkpoints against this consumed
+  final set. Training and all local comparisons are complete; activation is
+  held for a listening review/explicit decision about these automatic failures.
+  Prepared the private `voice-profile/finetuning/sisifo-review.md` with exact
+  audio links, discrepancies, metrics and the decision needed. New-profile
+  application generation is intentionally not run while installation is held.
+  All 16 profiles/32 samples and installed v1 remain unchanged. All 30 source
+  M4Bs and timestamp files rehash unchanged; full prepared-audio audit and mixed
+  corpus identity recheck also pass. The completed run retains its recovery
+  snapshots, both exports, all original reports and the local ASR model.
+- Final loop-until-dry verification completed twice with **998 passed / 4
+  unchanged skips** (28.54 s and 28.12 s), frontend **26 passed**, boundary and
+  type checks, web and desktop frontend builds. Fine-tuning Ruff lint/format,
+  diff whitespace and explicit no-weakened-tests/no-stubs audits pass. Existing
+  deprecation/bundle warnings and the four documented platform/opt-in skips
+  remain; no new skips or disabled checks. No human listening assessment,
+  new-profile API smoke, or packaged release build is claimed.
+- Final read-only checks: all four cross-check provenance chains validate;
+  installed v1's complete registration/model hashes equal the evaluation
+  baseline; database quick-check is healthy with **16 profiles / 32 samples /
+  zero Sísifo v2 profiles**; Voicebox on port **17493** is healthy. All six
+  review-page audio links exist. Removed only the nine task-specific temporary
+  diagnostic/setup scripts; private reports, samples, model downloads,
+  checkpoints and training corpora are retained. No cloud audio upload, paid
+  compute, git push, or publishing occurred. Work remains on local branch
+  `feat/fabian-finetuning`; **training complete, activation held for review**.

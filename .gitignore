@@ -7,9 +7,24 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 *.prompt
+
+# Local Python tooling and test output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+coverage/
+
 # Build outputs
 dist/
 build/
@@ -37,6 +52,8 @@ Thumbs.db
 # Data (user-generated)
 data/
 !data/.gitkeep
+# Docker Compose exports generated audio here.
+/output/
 
 # Logs
 *.log
@@ -44,7 +61,12 @@ logs/
 
 # Environment
 .env
-.env.local
+.env.*
+# Keep sanitized setup examples trackable, never populated credentials.
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
 
 # Generated files
 tauri/src-tauri/binaries/*

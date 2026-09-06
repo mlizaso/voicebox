@@ -221,7 +221,6 @@ async def run_generation(
         get_tts_backend_for_engine,
     )
     from ..backends.mlx_tts_lifecycle import (
-        loaded_tts_backend_for_request,
         run_blocking_operation_cancellation_safe,
         run_tts_operation_cancellation_safe,
     )
@@ -248,7 +247,9 @@ async def run_generation(
         if not tts_model.is_loaded():
             await history.update_generation_status(generation_id, "loading_model", bg_db)
 
-        async with loaded_tts_backend_for_request(engine, model_size) as tts_model:
+        from .finetuned_voices import loaded_backend_for_profile
+
+        async with loaded_backend_for_profile(engine, model_size, profile_id=profile_id, db=bg_db) as tts_model:
             if exact_voice_snapshot is not None:
                 voice_prompt = await run_tts_operation_cancellation_safe(
                     tts_model,
@@ -876,7 +877,6 @@ async def generate_audio_sync(
         engine_retries_runaway,
     )
     from ..backends.mlx_tts_lifecycle import (
-        loaded_tts_backend_for_request,
         run_blocking_operation_cancellation_safe,
         run_tts_operation_cancellation_safe,
     )
@@ -887,7 +887,9 @@ async def generate_audio_sync(
     bg_db = next(get_db())
     audio = None
     try:
-        async with loaded_tts_backend_for_request(engine, model_size) as tts_model:
+        from .finetuned_voices import loaded_backend_for_profile
+
+        async with loaded_backend_for_profile(engine, model_size, profile_id=profile_id, db=bg_db) as tts_model:
             voice_prompt = await run_tts_operation_cancellation_safe(
                 tts_model,
                 profiles.create_voice_prompt_for_profile(

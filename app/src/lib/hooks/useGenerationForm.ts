@@ -4,11 +4,12 @@ import { useForm } from 'react-hook-form';
 import * as z from 'zod';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
-import type { EffectConfig } from '@/lib/api/types';
+import type { EffectConfig, VoiceProfileResponse } from '@/lib/api/types';
 import { LANGUAGE_CODES, type LanguageCode } from '@/lib/constants/languages';
 import { useGeneration } from '@/lib/hooks/useGeneration';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useGenerationSettings } from '@/lib/hooks/useSettings';
+import { isFinetunedVoice } from '@/lib/utils/finetunedVoice';
 import { useGenerationStore } from '@/stores/generationStore';
 import { useUIStore } from '@/stores/uiStore';
 
@@ -35,6 +36,7 @@ const generationSchema = z.object({
 export type GenerationFormValues = z.infer<typeof generationSchema>;
 
 interface UseGenerationFormOptions {
+  selectedProfile?: VoiceProfileResponse | null;
   onSuccess?: (generationId: string) => void;
   defaultValues?: Partial<GenerationFormValues>;
   getEffectsChain?: () => EffectConfig[] | undefined;
@@ -87,6 +89,9 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
 
     try {
       const engine = data.engine || 'qwen';
+      const localVoice =
+        options.selectedProfile?.id === selectedProfileId &&
+        isFinetunedVoice(options.selectedProfile);
       const modelName =
         engine === 'luxtts'
           ? 'luxtts'
@@ -126,8 +131,8 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
 
       // Check if model needs downloading
       try {
-        const modelStatus = await apiClient.getModelStatus();
-        const model = modelStatus.models.find((m) => m.model_name === modelName);
+        const modelStatus = localVoice ? null : await apiClient.getModelStatus();
+        const model = modelStatus?.models.find((m) => m.model_name === modelName);
 
         if (model && !model.downloaded) {
           setDownloadingModelName(modelName);
@@ -141,15 +146,15 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         engine === 'qwen' || engine === 'qwen_custom_voice' || engine === 'tada';
       // Only Qwen CustomVoice actually honors the instruct kwarg at model level.
       // Base Qwen3-TTS accepts the kwarg but ignores it.
-      const supportsInstruct = engine === 'qwen_custom_voice';
+      const supportsInstruct = engine === 'qwen_custom_voice' && !localVoice;
       const effectsChain = options.getEffectsChain?.();
       // This now returns immediately with status="generating"
       const result = await generation.mutateAsync({
         profile_id: selectedProfileId,
         text: data.text,
-        language: data.language,
+        language: localVoice ? 'es' : data.language,
         seed: data.seed,
-        model_size: hasModelSizes ? data.modelSize : undefined,
+        model_size: localVoice ? '1.7B' : hasModelSizes ? data.modelSize : undefined,
         engine,
         instruct: supportsInstruct ? data.instruct || undefined : undefined,
         personality: data.personality || undefined,

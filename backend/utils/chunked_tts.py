@@ -627,7 +627,8 @@ async def generate_chunked(
     voice_prompt, language, seed, instruct
         Forwarded to ``backend.generate()`` verbatim.
     max_chunk_chars : int
-        Maximum characters per chunk (default 800).
+        Maximum characters per chunk (default 800), capped by a backend's
+        optional class-level ``max_input_chars`` when it requires shorter calls.
     crossfade_ms : int
         Crossfade duration in milliseconds between chunks.  0 for a hard
         cut with no overlap (default 50).
@@ -762,6 +763,11 @@ async def generate_chunked(
             )
         return chunk_audio, chunk_sr
 
+    backend_limit = getattr(type(backend), "max_input_chars", None)
+    if backend_limit is not None:
+        if type(backend_limit) is not int or backend_limit < 1:
+            raise ValueError("Backend max_input_chars must be a positive integer")
+        max_chunk_chars = min(max_chunk_chars, backend_limit)
     chunks = split_text_into_chunks(text, max_chunk_chars)
 
     if len(chunks) <= 1:
