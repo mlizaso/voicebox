@@ -18,6 +18,7 @@ checkout; upstream downloads do not necessarily contain this fork's changes.
 - [Run the project](#run-the-project)
 - [Create a voice and generate audio](#create-a-voice-and-generate-audio)
 - [Generate or resume an audiobook](#generate-or-resume-an-audiobook)
+- [Audiobook command card](AUDIOBOOK_COMMANDS.md)
 - [API and MCP](#api-and-mcp)
 - [Project structure](#project-structure)
 - [Backup, relocation, and troubleshooting](#backup-and-relocation)
@@ -174,6 +175,8 @@ then exports a mixed WAV. The private book wizard below adds book ingestion,
 metadata, final containers, and book-wide resume; it is not a built-in audiobook tab.
 
 ## Generate or resume an audiobook
+
+For the short copy/paste list, use the [audiobook command card](AUDIOBOOK_COMMANDS.md).
 
 For this machine's existing private workspace:
 

@@ -7,6 +7,19 @@
 > Current security/replay work through `8c6a3cf` is documented in the
 > [2026-09-05 audit](docs/SECURITY_AUDIT_2026-09-05.md).
 
+## Command-card audit (2026-09-06)
+
+- Reviewed all 31 tracked Markdown files, then traced the runnable audiobook
+  path to `voice-profile/build/make_audio.py` and its private renderer.
+- Added [AUDIOBOOK_COMMANDS.md](AUDIOBOOK_COMMANDS.md) with the normal launch,
+  resume, backend, storage, narrator, tool, and developer-check commands.
+- Confirmed Python/Tk, private renderer Python, FFmpeg, FFprobe, launcher syntax,
+  root `bun audit` (no vulnerabilities), and `bun pm untrusted` (none).
+- The docs workspace has a separate audit with three known advisories already
+  covered by the security audit and image-size patch; it is not required to
+  create an audiobook. `just` is not installed on this Mac and is not required
+  by the private launcher.
+
 ## Contract
 
 Implement durable audiobook-generation progress for

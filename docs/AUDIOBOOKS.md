@@ -1,6 +1,7 @@
 # Audiobook operating guide
 
 For the complete project entry point, start with the [main README](../README.md).
+For only the commands, use the [audiobook command card](../AUDIOBOOK_COMMANDS.md).
 This guide covers the private tools present on this Mac, checked against the
 local launcher and renderer. They are not a built-in Voicebox tab or part of a
 fresh clone: `voice-profile/` is ignored and `voice-profile/build/` has its own Git
