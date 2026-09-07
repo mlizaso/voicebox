@@ -21,9 +21,12 @@ Installing the main backend alone does not create the private renderer environme
 or supply the narrator samples. If moving the workspace, inspect these paths in
 `voice-profile/build/make_audio.py` before launching.
 
-The launcher uses `http://127.0.0.1:17494`; ordinary desktop development uses
-`17493`. It starts a backend when needed and passes an explicit data directory,
-defaulting to `/Users/manexlizaso/Developer/manex/voicebox/data`.
+The launcher defaults to `http://127.0.0.1:17494`, but automatically reuses a
+compatible local backend serving the same data directory, including port `17493`
+or a custom port. The terminal prints the selected URL. It starts a backend when
+needed and retries if a competing owner exits during startup. The data directory
+defaults to `/Users/manexlizaso/Developer/manex/voicebox/data`; an explicit
+`VOICEBOX_URL` disables switching to another address.
 
 | Launcher setting | Default / meaning |
 | --- | --- |
@@ -58,6 +61,19 @@ Voice definitions are in `voice-profile/build/voices/`; original reference audio
 and transcripts are in `voice-profile/samples/`. Backend profile IDs are runtime
 handles. The renderer's frozen voice content identifies reusable audio.
 
+**Which voices?** lists the local reference-audio presets and installed fine-tuned
+narrators from Voicebox, including Fabián v1 and v2. Select either kind for a demo
+or a complete audiobook; both use the same saved-progress workflow. Fabián v2
+retains its experimental label.
+
+Fine-tuned jobs freeze the checkpoint manifest hash, speaker, rendering settings,
+and runtime revision. Long text is split deterministically into model-sized units;
+finished phrases are checksum-verified and reused on resume. Keep the installed
+checkpoint and its `data/finetuned_voices/` registration: the job stores their
+identity, not a second copy of the model weights. Missing profile metadata can be
+recreated automatically. Missing or changed model files stop the render with an
+explanation, preserving existing audio instead of mixing different models.
+
 ## Saved progress and files
 
 | Item | Location / lifetime |
@@ -70,7 +86,8 @@ handles. The renderer's frozen voice content identifies reusable audio.
 | Durable book log | Selected output directory, with `[progress <job-id>]` in its name |
 | Backend startup diagnostics | `/tmp/voicebox-backend.log`, unless overridden |
 
-Find the backend's actual storage rather than inferring it from a port:
+Find the backend's actual storage rather than inferring it from a port (substitute
+the URL printed by the launcher if different):
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:17494/health/filesystem \

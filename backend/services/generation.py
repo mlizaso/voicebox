@@ -249,7 +249,17 @@ async def run_generation(
 
         from .finetuned_voices import loaded_backend_for_profile
 
-        async with loaded_backend_for_profile(engine, model_size, profile_id=profile_id, db=bg_db) as tts_model:
+        async with loaded_backend_for_profile(
+            engine,
+            model_size,
+            profile_id=profile_id,
+            db=bg_db,
+            **(
+                {"exact_voice_snapshot": exact_voice_snapshot}
+                if exact_voice_snapshot and exact_voice_snapshot.get("kind") == "finetuned"
+                else {}
+            ),
+        ) as tts_model:
             if exact_voice_snapshot is not None:
                 voice_prompt = await run_tts_operation_cancellation_safe(
                     tts_model,
@@ -275,7 +285,7 @@ async def run_generation(
             if exact_request_sha256 is not None:
                 if (
                     mode != "generate"
-                    or engine != "qwen"
+                    or engine not in {"qwen", "qwen_custom_voice"}
                     or seed is None
                     or expected_voice_binding_sha256 is None
                     or exact_voice_snapshot is None
@@ -283,6 +293,9 @@ async def run_generation(
                 ):
                     raise ValueError("Chunk checkpoints require a seeded exact singleton Qwen request")
                 effective_max_chunk_chars = max_chunk_chars or DEFAULT_MAX_CHUNK_CHARS
+                model_limit = getattr(tts_model, "max_input_chars", None)
+                if isinstance(model_limit, int) and model_limit > 0:
+                    effective_max_chunk_chars = min(effective_max_chunk_chars, model_limit)
                 if len(split_text_into_chunks(text, effective_max_chunk_chars)) > 1:
                     from .exact_chunk_checkpoints import ExactChunkCheckpointSession
 

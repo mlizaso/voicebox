@@ -189,7 +189,28 @@ def _finish_import_audio_intent(
 
 
 def _resolve_generation_engine(data: models.GenerationRequest, profile) -> str:
-    return data.engine or getattr(profile, "default_engine", None) or getattr(profile, "preset_engine", None) or "qwen"
+    from ..services.finetuned_voices import is_finetuned_profile
+
+    if (
+        data.tts_implementation_revision
+        and (getattr(profile, "voice_type", None) or "cloned") != "cloned"
+        and not is_finetuned_profile(profile)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Exact generation requires a cloned profile with reference audio or an installed fine-tuned profile",
+        )
+    engine = (
+        data.engine or getattr(profile, "default_engine", None) or getattr(profile, "preset_engine", None) or "qwen"
+    )
+    if data.tts_implementation_revision and engine == "qwen_custom_voice":
+        if not is_finetuned_profile(profile):
+            raise HTTPException(
+                status_code=422, detail="Exact CustomVoice generation requires an installed fine-tuned voice"
+            )
+        if data.language != "es" or data.instruct:
+            raise HTTPException(status_code=422, detail="This fine-tuned narrator requires Spanish and fixed delivery")
+    return engine
 
 
 def _require_tts_implementation_revision(
@@ -222,6 +243,10 @@ def _require_tts_implementation_revision(
         )
     if engine is None:
         return
+    if engine == "qwen_custom_voice":
+        if model_size != "1.7B":
+            raise HTTPException(status_code=422, detail="Fine-tuned exact generation requires Qwen 1.7B")
+        return
     if engine != "qwen":
         raise HTTPException(
             status_code=422,
@@ -241,6 +266,13 @@ def _require_exact_seed(data: models.GenerationRequest) -> None:
         raise HTTPException(
             status_code=422,
             detail="An explicit seed is required for exact generation",
+        )
+
+
+def _require_voice_binding(data: models.GenerationRequest, binding: str) -> None:
+    if data.expected_voice_binding_sha256 is not None and data.expected_voice_binding_sha256 != binding:
+        raise HTTPException(
+            status_code=409, detail="Voice checkpoint changed; restore the saved voice or start a new audiobook"
         )
 
 
@@ -275,6 +307,8 @@ async def _generate_speech_impl(
     exact: bool,
 ):
     """Generate speech from text using a voice profile."""
+    if data.expected_voice_binding_sha256 is not None and not exact:
+        raise HTTPException(status_code=422, detail="A frozen voice binding requires an exact generation route")
     _require_tts_implementation_revision(data, required=exact)
     if exact:
         _require_exact_seed(data)
@@ -296,17 +330,12 @@ async def _generate_speech_impl(
 
     voice_binding_sha256 = None
     exact_voice_snapshot = None
+    if exact and data.personality:
+        raise HTTPException(
+            status_code=422,
+            detail="Exact generation cannot rewrite text with personality mode",
+        )
     if exact:
-        if (getattr(profile, "voice_type", None) or "cloned") != "cloned":
-            raise HTTPException(
-                status_code=422,
-                detail="Exact pinned Qwen generation requires a cloned profile with reference audio",
-            )
-        if data.personality:
-            raise HTTPException(
-                status_code=422,
-                detail="Exact generation cannot rewrite text with personality mode",
-            )
         try:
             exact_voice_snapshot = profiles.freeze_exact_voice_profile(
                 data.profile_id,
@@ -314,6 +343,7 @@ async def _generate_speech_impl(
                 engine=engine,
             )
             voice_binding_sha256 = exact_voice_snapshot["voice_binding_sha256"]
+            _require_voice_binding(data, voice_binding_sha256)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -471,6 +501,7 @@ def _matching_existing_batch(
                 detail=f"Exact batch generation ID {item.generation_id} has invalid voice snapshot",
             )
         resolved_snapshots.append(snapshot)
+        _require_voice_binding(item.request, row.voice_binding_sha256)
         expected_request_hashes.append(
             _exact_request_sha256(
                 item.request,
@@ -563,7 +594,7 @@ def _exact_request_sha256(
     """
     payload = json.dumps(
         {
-            "request": request.model_dump(mode="json", exclude={"profile_id"}),
+            "request": request.model_dump(mode="json", exclude={"profile_id", "expected_voice_binding_sha256"}),
             "voice_binding_sha256": voice_binding_sha256,
             "resolved_effects_chain": resolved_effects_chain,
         },
@@ -667,14 +698,11 @@ async def generate_speech_batch_exact(
     profile = await profiles.get_profile(profile_id, db)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    if (getattr(profile, "voice_type", None) or "cloned") != "cloned":
-        raise HTTPException(
-            status_code=422,
-            detail="Exact pinned Qwen generation requires a cloned profile with reference audio",
-        )
     from ..utils.chunked_tts import split_text_into_chunks
 
     engines = [_resolve_generation_engine(request, profile) for request in requests]
+    if len(requests) == 2 and engines[0] != "qwen":
+        raise HTTPException(status_code=422, detail="Fine-tuned exact requests run one unit at a time")
     for request, engine in zip(requests, engines, strict=True):
         try:
             profiles.validate_profile_engine(profile, engine)
@@ -714,6 +742,8 @@ async def generate_speech_batch_exact(
             engine=engines[0],
         )
         voice_binding_sha256 = exact_voice_snapshot["voice_binding_sha256"]
+        for request in requests:
+            _require_voice_binding(request, voice_binding_sha256)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     exact_voice_snapshot_json = _canonical_exact_voice_snapshot_json(exact_voice_snapshot)
@@ -1140,6 +1170,8 @@ async def _stream_speech_impl(
     exact: bool,
 ):
     """Generate speech and stream the WAV audio directly without saving to disk."""
+    if data.expected_voice_binding_sha256 is not None and not exact:
+        raise HTTPException(status_code=422, detail="A frozen voice binding requires an exact generation route")
     _require_tts_implementation_revision(data, required=exact)
     if exact:
         _require_exact_seed(data)
@@ -1180,17 +1212,11 @@ async def _stream_speech_impl(
 
     voice_binding_sha256 = None
     exact_voice_snapshot = None
-    if exact:
-        if (getattr(profile, "voice_type", None) or "cloned") != "cloned":
-            raise HTTPException(
-                status_code=422,
-                detail="Exact pinned Qwen generation requires a cloned profile with reference audio",
-            )
-        if data.personality:
-            raise HTTPException(
-                status_code=422,
-                detail="Exact generation cannot rewrite text with personality mode",
-            )
+    if exact and data.personality:
+        raise HTTPException(
+            status_code=422,
+            detail="Exact generation cannot rewrite text with personality mode",
+        )
     engine = _resolve_generation_engine(data, profile)
     try:
         profiles.validate_profile_engine(profile, engine)
@@ -1206,6 +1232,7 @@ async def _stream_speech_impl(
                 engine=engine,
             )
             voice_binding_sha256 = exact_voice_snapshot["voice_binding_sha256"]
+            _require_voice_binding(data, voice_binding_sha256)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1226,7 +1253,16 @@ async def _stream_speech_impl(
             if not is_finetuned_profile(profile):
                 await ensure_model_cached_or_raise(engine, model_size)
             async with loaded_backend_for_profile(
-                engine, model_size, profile_id=data.profile_id, db=db, profile=profile
+                engine,
+                model_size,
+                profile_id=data.profile_id,
+                db=db,
+                profile=profile,
+                **(
+                    {"exact_voice_snapshot": exact_voice_snapshot}
+                    if exact_voice_snapshot and exact_voice_snapshot.get("kind") == "finetuned"
+                    else {}
+                ),
             ) as tts_model:
                 if voice_binding_sha256 is not None:
                     try:

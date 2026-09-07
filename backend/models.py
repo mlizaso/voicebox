@@ -123,6 +123,11 @@ class GenerationRequest(BaseModel):
         max_length=128,
         description="Exact server TTS implementation required before accepting generation",
     )
+    expected_voice_binding_sha256: str | None = Field(
+        None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="Frozen audiobook voice identity required before accepting exact generation",
+    )
     effects_chain: list["EffectConfig"] | None = Field(
         None,
         max_length=32,

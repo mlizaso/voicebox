@@ -72,6 +72,217 @@ def test_model_weight_mutation_is_rejected_before_load(local_voice):
         finetuned_voices.read_voice("finetuned:fabian", verify_weights=True)
 
 
+def test_exact_finetuned_snapshot_pins_model_but_not_display_name(local_voice):
+    snapshot = finetuned_voices.freeze_exact_voice(local_voice["voice_id"])
+    assert "model_path" not in snapshot
+    assert "name" not in snapshot
+    registration = finetuned_voices.registry_directory() / "fabian.json"
+    registration.write_text(json.dumps({**local_voice, "name": "Renamed narrator"}))
+    assert finetuned_voices.freeze_exact_voice(local_voice["voice_id"]) == snapshot
+    finetuned_voices.resolve_exact_voice(snapshot, snapshot["voice_binding_sha256"])
+
+    manifest_path = Path(local_voice["model_path"]) / "voicebox_finetune.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["training_update"] = 42
+    manifest_path.write_text(json.dumps(manifest))
+    registration.write_text(json.dumps({**local_voice, "manifest_sha256": finetuned_voices.file_sha256(manifest_path)}))
+    with pytest.raises(ValueError, match="checkpoint changed"):
+        finetuned_voices.resolve_exact_voice(snapshot, snapshot["voice_binding_sha256"])
+
+
+@pytest.mark.parametrize("field", ["speaker", "manifest_sha256", "preset_voice_id", "voice_binding_sha256"])
+def test_exact_finetuned_snapshot_rejects_tampering(local_voice, field):
+    snapshot = finetuned_voices.freeze_exact_voice(local_voice["voice_id"])
+    original = snapshot["voice_binding_sha256"]
+    snapshot[field] = "changed"
+    with pytest.raises(ValueError, match="snapshot"):
+        finetuned_voices.resolve_exact_voice(snapshot, original)
+
+
+@pytest.fixture
+def audiobook_api(local_voice, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from starlette.testclient import TestClient
+
+    from backend.database import Base, VoiceProfile, get_db
+    from backend.routes import generations, profiles as profile_routes
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'audiobook.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    with sessions() as db:
+        db.add(
+            VoiceProfile(
+                id="narrator",
+                name="Fabián",
+                language="es",
+                voice_type="preset",
+                preset_engine="qwen_custom_voice",
+                default_engine="qwen_custom_voice",
+                preset_voice_id=local_voice["voice_id"],
+            )
+        )
+        db.commit()
+
+    def database():
+        with sessions() as db:
+            yield db
+
+    app = FastAPI()
+    app.include_router(generations.router)
+    app.include_router(profile_routes.router)
+    app.dependency_overrides[get_db] = database
+    monkeypatch.setattr("backend.backends.get_tts_implementation_revision", lambda: "audiobook-runtime")
+    with TestClient(app) as client:
+        yield client, sessions
+    engine.dispose()
+
+
+def test_finetuned_audiobook_identity_and_exact_admission(audiobook_api, monkeypatch):
+    from backend.routes import generations
+
+    client, _sessions = audiobook_api
+    identity = client.get("/profiles/narrator/audiobook")
+    assert identity.status_code == 200
+    snapshot = identity.json()["snapshot"]
+    captured = []
+
+    def enqueue(_id, coro):
+        captured.append(coro.cr_frame.f_locals.copy())
+        coro.close()
+
+    monkeypatch.setattr(generations, "enqueue_generation", enqueue)
+    request = {
+        "profile_id": "narrator",
+        "text": "El libro empieza aquí.",
+        "language": "es",
+        "engine": "qwen_custom_voice",
+        "model_size": "1.7B",
+        "seed": 123,
+        "tts_implementation_revision": "audiobook-runtime",
+        "expected_voice_binding_sha256": snapshot["voice_binding_sha256"],
+    }
+    result = client.post("/generate/exact", json=request)
+    assert result.status_code == 200, result.text
+    assert captured[0]["exact_voice_snapshot"] == snapshot
+    assert captured[0]["expected_voice_binding_sha256"] == snapshot["voice_binding_sha256"]
+    for route in ("/generate/exact", "/generate/stream/exact"):
+        result = client.post(route, json={**request, "expected_voice_binding_sha256": "0" * 64})
+        assert result.status_code == 409, result.text
+    assert len(captured) == 1
+
+
+def test_finetuned_snapshot_does_not_block_reference_cache_gc(audiobook_api):
+    from backend.database import Generation
+
+    client, sessions = audiobook_api
+    snapshot = client.get("/profiles/narrator/audiobook").json()["snapshot"]
+    with sessions() as db:
+        db.add(
+            Generation(
+                id="incomplete",
+                profile_id="narrator",
+                text="Test",
+                language="es",
+                status="failed",
+                audio_path="",
+                duration=0,
+                exact_voice_snapshot_json=json.dumps(snapshot),
+                voice_binding_sha256=snapshot["voice_binding_sha256"],
+            )
+        )
+        db.commit()
+        profiles.garbage_collect_exact_voice_snapshots(db)
+        assert finetuned_voices.read_voice("finetuned:fabian", verify_weights=True)
+
+
+def test_exact_finetuned_stream_preserves_long_text_and_seeds(audiobook_api, monkeypatch):
+    import numpy as np
+
+    from backend.backends import qwen_finetuned_backend
+    from backend.routes import generations
+
+    client, _sessions = audiobook_api
+    snapshot = client.get("/profiles/narrator/audiobook").json()["snapshot"]
+    calls = []
+
+    class TestBackend:
+        max_input_chars = 200
+
+        async def generate(self, text, prompt, language, seed, instruct):
+            assert prompt["preset_voice_id"] == "finetuned:fabian"
+            calls.append((text, seed))
+            return np.full(24000, 0.1, dtype=np.float32), 24000
+
+    @asynccontextmanager
+    async def voice_request(voice, _size):
+        assert voice["manifest_sha256"] == snapshot["manifest_sha256"]
+        yield TestBackend()
+
+    async def queue(_id, operation, **_kwargs):
+        return await operation
+
+    monkeypatch.setattr(generations, "run_queued_generation", queue)
+    monkeypatch.setattr(
+        qwen_finetuned_backend, "get_local_backend", lambda: SimpleNamespace(voice_request=voice_request)
+    )
+    text = " ".join(f"La palabra número {i} pertenece al libro." for i in range(20))
+    request = {
+        "profile_id": "narrator",
+        "text": text,
+        "language": "es",
+        "seed": 81,
+        "engine": "qwen_custom_voice",
+        "model_size": "1.7B",
+        "max_chunk_chars": 1200,
+        "effects_chain": [],
+        "tts_implementation_revision": "audiobook-runtime",
+        "expected_voice_binding_sha256": snapshot["voice_binding_sha256"],
+    }
+    first = client.post("/generate/stream/exact", json=request)
+    assert first.status_code == 200, first.text
+    assert first.content[:4] == b"RIFF"
+    first_calls = calls.copy()
+    assert len(calls) > 1
+    assert all(len(chunk) <= 200 for chunk, _seed in calls)
+    assert " ".join(chunk for chunk, _seed in calls).split() == text.split()
+    assert len({seed for _text, seed in calls}) == len(calls)
+    second = client.post("/generate/stream/exact", json=request)
+    assert second.status_code == 200, second.text
+    assert calls[len(first_calls) :] == first_calls
+    assert second.content == first.content
+
+
+@pytest.mark.asyncio
+async def test_queued_finetuned_snapshot_does_not_follow_live_profile_edits(local_voice, monkeypatch):
+    from backend.backends import qwen_finetuned_backend
+
+    snapshot = finetuned_voices.freeze_exact_voice(local_voice["voice_id"])
+    captured = []
+
+    @asynccontextmanager
+    async def voice_request(voice, _size):
+        captured.append(voice["voice_id"])
+        yield "saved narrator"
+
+    monkeypatch.setattr(
+        qwen_finetuned_backend, "get_local_backend", lambda: SimpleNamespace(voice_request=voice_request)
+    )
+    edited_profile = SimpleNamespace(voice_type="preset", preset_engine="qwen_custom_voice", preset_voice_id="Ryan")
+    async with finetuned_voices.loaded_backend_for_profile(
+        "qwen_custom_voice",
+        "1.7B",
+        profile_id="narrator",
+        db=None,
+        profile=edited_profile,
+        exact_voice_snapshot=snapshot,
+    ) as backend:
+        assert backend == "saved narrator"
+    assert captured == ["finetuned:fabian"]
+
+
 @pytest.mark.asyncio
 async def test_finetuned_profile_binds_its_model_before_any_builtin_download(local_voice, monkeypatch):
     from backend.backends import qwen_finetuned_backend
@@ -138,12 +349,12 @@ async def test_local_backend_rejects_unbounded_direct_calls_before_inference():
 
 @pytest.mark.asyncio
 async def test_installation_is_idempotent_and_preserves_existing_voices(local_voice, tmp_path):
+    from scripts.finetune_qwen.install import register_profile
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
     from backend.database.models import Base, VoiceProfile
     from backend.models import VoiceProfileCreate
-    from scripts.finetune_qwen.install import register_profile
 
     engine = create_engine(f"sqlite:///{tmp_path / 'install.db'}")
     Base.metadata.create_all(engine)

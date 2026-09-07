@@ -1,5 +1,6 @@
 """Voice profile endpoints."""
 
+import asyncio
 import json as _json
 import logging
 import tempfile
@@ -133,6 +134,35 @@ async def get_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile
+
+
+@router.get("/profiles/{profile_id}/audiobook")
+async def audiobook_voice_identity(profile_id: str, verify_weights: bool = False, db: Session = Depends(get_db)):
+    """Return the installed narrator's model identity for durable audiobook jobs."""
+    from ..backends import get_tts_implementation_revision
+    from ..services.finetuned_voices import freeze_exact_voice, is_finetuned_profile, read_voice
+
+    profile = await profiles.get_profile(profile_id, db)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if not is_finetuned_profile(profile):
+        raise HTTPException(status_code=422, detail="This profile does not use an installed fine-tuned checkpoint")
+    try:
+        snapshot = freeze_exact_voice(profile.preset_voice_id)
+        voice = await asyncio.to_thread(read_voice, profile.preset_voice_id, verify_weights=verify_weights)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "profile_id": profile_id,
+        "name": profile.name,
+        "engine": "qwen_custom_voice",
+        "model_size": "1.7B",
+        "language": "es",
+        "max_chunk_chars": 200,
+        "snapshot": snapshot,
+        "acceptance_status": voice.get("acceptance_status", "accepted"),
+        "tts_implementation_revision": get_tts_implementation_revision(),
+    }
 
 
 @router.put("/profiles/{profile_id}", response_model=models.VoiceProfileResponse)

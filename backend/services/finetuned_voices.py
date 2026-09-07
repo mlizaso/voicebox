@@ -94,11 +94,69 @@ def list_voices() -> list[dict]:
     return voices
 
 
+def freeze_exact_voice(voice_id: str) -> dict:
+    """Pin an installed checkpoint by content; names and local paths may change."""
+    voice = read_voice(voice_id)
+    snapshot = {
+        "format_version": 1,
+        "kind": "finetuned",
+        "preset_voice_id": voice_id,
+        "manifest_sha256": voice["manifest_sha256"],
+        "speaker": voice["speaker"],
+    }
+    snapshot["voice_binding_sha256"] = _snapshot_binding(snapshot)
+    return snapshot
+
+
+def _snapshot_binding(snapshot: dict) -> str:
+    identity = {key: value for key, value in snapshot.items() if key != "voice_binding_sha256"}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_exact_snapshot(snapshot: dict, expected_binding: str) -> None:
+    """Validate saved metadata without requiring the model to remain installed."""
+    if (
+        set(snapshot)
+        != {"format_version", "kind", "preset_voice_id", "manifest_sha256", "speaker", "voice_binding_sha256"}
+        or snapshot.get("format_version") != 1
+        or snapshot.get("kind") != "finetuned"
+        or not isinstance(snapshot.get("preset_voice_id"), str)
+        or not re.fullmatch(r"finetuned:[a-z][a-z0-9_-]{0,47}", snapshot["preset_voice_id"])
+        or not isinstance(snapshot.get("manifest_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot["manifest_sha256"])
+        or not isinstance(snapshot.get("speaker"), str)
+        or not snapshot["speaker"]
+        or snapshot.get("voice_binding_sha256") != expected_binding
+        or _snapshot_binding(snapshot) != expected_binding
+    ):
+        raise ValueError("Invalid fine-tuned voice snapshot or checkpoint binding")
+
+
+def resolve_exact_voice(snapshot: dict, expected_binding: str) -> dict:
+    """Reject a changed checkpoint before loading or reusing any saved speech."""
+    validate_exact_snapshot(snapshot, expected_binding)
+    voice = read_voice(snapshot["preset_voice_id"])
+    if voice["manifest_sha256"] != snapshot["manifest_sha256"] or voice["speaker"] != snapshot["speaker"]:
+        raise ValueError("Fine-tuned checkpoint changed; restore the saved model or start a new audiobook")
+    return voice
+
+
 @asynccontextmanager
-async def loaded_backend_for_profile(engine: str, model_size: str, *, profile_id: str, db, profile=None):
+async def loaded_backend_for_profile(
+    engine: str, model_size: str, *, profile_id: str, db, profile=None, exact_voice_snapshot: dict | None = None
+):
     """Bind local profiles before loading, so they never download a preset base."""
     from ..backends.mlx_tts_lifecycle import loaded_tts_backend_for_request
 
+    if exact_voice_snapshot is not None and exact_voice_snapshot.get("kind") == "finetuned":
+        if engine != "qwen_custom_voice":
+            raise ValueError("Fine-tuned snapshots require the local CustomVoice engine")
+        from ..backends.qwen_finetuned_backend import get_local_backend
+
+        voice = resolve_exact_voice(exact_voice_snapshot, exact_voice_snapshot.get("voice_binding_sha256"))
+        async with get_local_backend().voice_request(voice, model_size) as selected_backend:
+            yield selected_backend
+        return
     if engine == "qwen_custom_voice":
         if profile is None:
             from .profiles import get_profile

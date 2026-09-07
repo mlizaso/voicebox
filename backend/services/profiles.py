@@ -206,6 +206,10 @@ def compute_profile_voice_binding_sha256(profile_id: str, db: Session) -> str:
     profile = db.query(DBVoiceProfile).filter_by(id=profile_id).first()
     if profile is None:
         raise ValueError(f"Profile not found: {profile_id}")
+    from .finetuned_voices import freeze_exact_voice, is_finetuned_profile
+
+    if is_finetuned_profile(profile):
+        return freeze_exact_voice(profile.preset_voice_id)["voice_binding_sha256"]
     voice_type = getattr(profile, "voice_type", None) or "cloned"
     payload: dict = {"version": 1, "voice_type": voice_type}
     if voice_type == "cloned":
@@ -710,6 +714,11 @@ def freeze_exact_voice_profile(
     profile = db.query(DBVoiceProfile).filter_by(id=profile_id).first()
     if profile is None:
         raise ValueError(f"Profile not found: {profile_id}")
+    from .finetuned_voices import freeze_exact_voice, is_finetuned_profile
+
+    if is_finetuned_profile(profile):
+        validate_profile_engine(profile, engine)
+        return freeze_exact_voice(profile.preset_voice_id)
     if (getattr(profile, "voice_type", None) or "cloned") != "cloned":
         raise ValueError("Exact pinned Qwen generation requires a cloned profile")
     validate_profile_engine(profile, engine)
@@ -897,6 +906,13 @@ async def create_exact_voice_prompt_from_snapshot(
 ) -> dict:
     """Create model conditioning only from the raw snapshot accepted by the route."""
     _require_exact_tts_revision(expected_tts_implementation_revision)
+    if descriptor.get("kind") == "finetuned":
+        from .finetuned_voices import resolve_exact_voice
+
+        if engine != "qwen_custom_voice":
+            raise ValueError("Fine-tuned snapshots require the local CustomVoice engine")
+        voice = resolve_exact_voice(descriptor, expected_voice_binding_sha256)
+        return {"voice_type": "preset", "preset_engine": engine, "preset_voice_id": voice["voice_id"]}
     snapshot_dir, metadata = _verify_raw_exact_snapshot(
         descriptor,
         expected_binding_sha256=expected_voice_binding_sha256,
@@ -1086,6 +1102,17 @@ def _exact_voice_snapshot_owners(db: Session, root: Path) -> tuple[set[str], set
                 raise ExactVoiceSnapshotGarbageCollectionError(
                     f"Exact generation {generation_id} has invalid snapshot ownership"
                 ) from exc
+            if isinstance(descriptor, dict) and descriptor.get("kind") == "finetuned":
+                from .finetuned_voices import validate_exact_snapshot
+
+                try:
+                    validate_exact_snapshot(descriptor, binding)
+                except ValueError as exc:
+                    raise ExactVoiceSnapshotGarbageCollectionError(
+                        f"Exact generation {generation_id} has invalid fine-tuned snapshot ownership"
+                    ) from exc
+                # The checkpoint is operator-owned, outside this reference-cache store.
+                continue
             if not isinstance(descriptor, dict) or set(descriptor) != {
                 "format_version",
                 "snapshot_key",
