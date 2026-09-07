@@ -1301,3 +1301,92 @@ below for verification and the remaining subjective/UI-review limitations.
   checkpoints and training corpora are retained. No cloud audio upload, paid
   compute, git push, or publishing occurred. Work remains on local branch
   `feat/fabian-finetuning`; **training complete, activation held for review**.
+
+## Fabián v2 quality follow-up — 2026-09-07
+
+- Request: investigate and correct incomplete narration endings and finish the
+  pending audio review. User explicitly selected `gpt-6-astra` with `high`
+  reasoning. Astra high is performing the code investigation and was separately
+  given an original WAV for an audio-capability probe.
+- The Astra probe explicitly reports unsupported audio input. Auditory coverage
+  in this follow-up is therefore zero. A text-model assessment cannot complete
+  the listening requirement. Requested the user's choice about resuming the
+  existing Gemini audio reviewer while retaining Astra for engineering; no
+  external audio request or billing change has been made by this follow-up.
+- Existing evidence does not establish a cut in step-300's disputed ending:
+  medium ASR appends words after `pasiones`, while other recognizers and the
+  previous audio-model first pass stop at the intended ending. The `Fue la`
+  onset remains unresolved. Do not train on these exposed held-out cases or
+  change acceptance thresholds to erase the disagreement.
+- Scope: confirm audio access, preserve and reconcile original paired evidence,
+  fix only demonstrated generation defects, and evaluate any intervention on
+  fresh material as well as the existing regression cases. Keep original model
+  exports, reports and registration evidence intact. The current v2 registration
+  is an explicitly authorized experimental installation, not an automatic pass.
+- Runtime: native macOS arm64 and the existing backend virtual environment.
+  Fine-tuning Ruff lint and format checks pass (28 files). Initial pytest run
+  aborted loading MLX in the sandbox; rerunning with native Metal access.
+- Native rerun completed: **91 passed**, 10 existing dependency deprecation
+  warnings, 10.89 seconds. All 21 review-package checksum entries pass, including
+  the 18 original WAVs. The existing offline reviewer plan validates 36 jobs and
+  a largest request of 18,124,048 bytes; this check sends no audio or API calls.
+- Astra high code investigation completed without a demonstrated generator bug.
+  The full `Fue la` text reaches one bounded generation call; this case has no
+  cross-chunk fade or trimming callback. No examined case hit the token limit.
+  Current evaluator/backend/chunker hashes match the evaluated sources. The
+  disputed `pasiones` WAV has identical hashes across disagreeing recognizers.
+  The investigator ran 15 additional targeted tests successfully without GPU
+  inference. No production code, training weights or registrations were changed.
+- Outcome: quality improvement and completed listening remain pending an
+  audio-capable review. Do not claim this investigation improved the voice or
+  certified its endings. Waiting for the user's requested review-medium choice.
+
+## Audiobook duration-limit interruption — 2026-09-07
+
+- User reported a stopped `finetuned-fabian` audiobook. The saved render is v1,
+  not the v2 listening experiment. The renderer repeats HTTP 500 for 120 seconds;
+  the backend log shows `Fine-tuned model reached its duration limit before
+  finishing`. Exact failed input: `Porque entonces, los oyes.`, seed 20261305,
+  chapter 4, phrase index 472, job b4986936d7134c7c940f5a7d9e8e6b0b.
+- Verified all **497 completed artifact records** against saved sizes/SHA-256:
+  493 phrases plus four chapters; no damaged/missing completed artifact found.
+- Astra high is implementing bounded deterministic duration-limit recovery and
+  error classification; a second Astra high task handles the private launcher's
+  narrowly approved runtime transition with preserved source provenance. No
+  automatic bypass of arbitrary runtime/checkpoint changes is permitted.
+- Acceptance: reproduce the actual failure, recover the exact request repeatedly
+  with identical samples, preserve the successful first-attempt waveform path,
+  test retry exhaustion and unrelated errors, and verify checkpoint migration
+  preserves only intact completed audio and rejects changed inputs. Original
+  job/cache files have only been read at this stage.
+- Real native model verification reproduced the exact error, then generated the
+  complete phrase through recovery twice with sample-identical results: 55,680
+  samples at 24 kHz (2.32 seconds), PCM SHA-256
+  `53baf9c1227909c938a2e9c4d5dc26f06e4b79901b800d343f9133441aee62d5`.
+  The nearby successful phrase at seed 20261304 remains sample-identical between
+  direct inference and the new chunked path. Independent local Whisper medium,
+  without reference hints, transcribes `Porque entonces los oyes.`. Private
+  evidence is under `voice-profile/finetuning/duration-recovery-20260907/`.
+- Full backend and fine-tuning regressions: **1,066 passed / 4 existing skips**,
+  35.65 seconds; changed Python lint/format passes. The pinned new recovery runtime
+  is `qwen3-mlx-audio-0.4.1-bf16-b2-icl-v3-dur-v1-runtime-sha256-ab2166c22c3101361c8f9d7e72ef553aa7fbfe83943deba8e75612a1445ced5a`;
+  source and embedded fingerprints agree. No full-book quality claim is made by
+  this one-phrase recovery check; v2 listening remains a separate pending task.
+- Private recovery helper and launcher hook are verified: 39 recovery tests,
+  plus the optional real-manifest fixture explicitly supplied and passing;
+  155 private regressions with 13 subtests pass. The real copied manifest retains
+  all 493 phrases/four chapters and resumes at the exact pending text/seed.
+  Original waveform bytes remain unchanged; original manifest backups and source
+  provenance accompany the one literal approved runtime transition. Corruption,
+  changed parameters/models, unapproved runtimes and incomplete audio are rejected.
+  The real job and its original artifacts remain unmodified until the user resumes.
+- Restarted the identified idle audiobook backend (old PID 6412) gracefully and
+  started the corrected service using the existing launcher's `ensure_backend`.
+  Actual `render_phrased.gen` exact HTTP requests now succeed twice with identical
+  PCM16 WAV bytes, SHA-256
+  `f4bc8a96623f001196b14dcc9d96d75be467f3f388c4f108fa65b3232e30dd64`.
+  The saved job's documents reserialize to exactly the existing renderer docs.
+- Handoff: Save and close the old window, reopen `make_audio.py`, then Resume.
+  The audited migration runs under the job/render locks. No full-book render was
+  started by this fix. Private code remains local in the separately dirty build
+  repository; its unrelated pre-existing modifications were not staged or reset.

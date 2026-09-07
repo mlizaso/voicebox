@@ -347,6 +347,106 @@ async def test_local_backend_rejects_unbounded_direct_calls_before_inference():
         await backend.generate("Una frase de prueba. " * 30, {}, language="es")
 
 
+@pytest.mark.parametrize("tokens", [74, 75, 76])
+def test_local_backend_classifies_duration_exhaustion_without_changing_budget(monkeypatch, tokens):
+    import sys
+
+    import numpy as np
+
+    from backend.utils.chunked_tts import SynthesisDurationLimitError
+
+    core = SimpleNamespace(random=SimpleNamespace(seed=lambda _seed: None))
+    monkeypatch.setitem(sys.modules, "mlx", SimpleNamespace(core=core))
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    calls = []
+    expected_audio = np.ones(2400, dtype=np.float32)
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        yield SimpleNamespace(audio=expected_audio, sample_rate=24000, token_count=tokens)
+
+    backend = LocalQwenCustomVoiceBackend()
+    backend.voice = {"speaker": "fabian"}
+    backend.model = SimpleNamespace(
+        tokenizer=SimpleNamespace(encode=lambda _text: [1, 2, 3]),
+        _voicebox_finetuned_seed=lambda _seed: None,
+        generate_custom_voice=generate,
+    )
+    if tokens >= 75:
+        with pytest.raises(SynthesisDurationLimitError, match="duration limit before finishing"):
+            backend._generate_on_stream("Texto breve.", 17)
+    else:
+        audio, rate = backend._generate_on_stream("Texto breve.", 17)
+        np.testing.assert_array_equal(audio, expected_audio)
+        assert rate == 24000
+    assert calls == [
+        {
+            "text": "Texto breve.",
+            "speaker": "fabian",
+            "language": "Spanish",
+            "max_tokens": 75,
+            "stream": False,
+            "verbose": False,
+        }
+    ]
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_exact_finetuned_duration_limit_recovers_or_returns_synthesis_fault(audiobook_api, monkeypatch, recovers):
+    import numpy as np
+
+    from backend.backends import qwen_finetuned_backend
+    from backend.routes import generations
+    from backend.utils.chunked_tts import SynthesisDurationLimitError
+
+    client, _sessions = audiobook_api
+    snapshot = client.get("/profiles/narrator/audiobook").json()["snapshot"]
+    calls = []
+
+    class LimitedBackend:
+        max_input_chars = 200
+
+        async def generate(self, text, *_args):
+            calls.append(text)
+            if not recovers or len(text) > 100:
+                raise SynthesisDurationLimitError("Fine-tuned model reached its duration limit before finishing")
+            return np.full(24000, 0.1, dtype=np.float32), 24000
+
+    @asynccontextmanager
+    async def voice_request(_voice, _size):
+        yield LimitedBackend()
+
+    async def queue(_id, operation, **_kwargs):
+        return await operation
+
+    monkeypatch.setattr(generations, "run_queued_generation", queue)
+    monkeypatch.setattr(
+        qwen_finetuned_backend, "get_local_backend", lambda: SimpleNamespace(voice_request=voice_request)
+    )
+    response = client.post(
+        "/generate/stream/exact",
+        json={
+            "profile_id": "narrator",
+            "text": "Una frase breve. " * 10,
+            "language": "es",
+            "seed": 81,
+            "engine": "qwen_custom_voice",
+            "model_size": "1.7B",
+            "effects_chain": [],
+            "tts_implementation_revision": "audiobook-runtime",
+            "expected_voice_binding_sha256": snapshot["voice_binding_sha256"],
+        },
+    )
+    if recovers:
+        assert response.status_code == 200, response.text
+        assert response.content[:4] == b"RIFF"
+        assert len(calls) == 5
+    else:
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "Fine-tuned model reached its duration limit before finishing"
+        assert len(calls) == 6
+
+
 @pytest.mark.asyncio
 async def test_installation_is_idempotent_and_preserves_existing_voices(local_voice, tmp_path):
     from scripts.finetune_qwen.install import register_profile

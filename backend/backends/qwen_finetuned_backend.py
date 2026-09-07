@@ -8,6 +8,7 @@ from types import FunctionType, MethodType
 import numpy as np
 
 from ..services.finetuned_voices import read_voice
+from ..utils.chunked_tts import SynthesisDurationLimitError
 from .mlx_tts_lifecycle import mlx_tts_lifecycle_guard, run_blocking_operation_cancellation_safe
 
 
@@ -204,7 +205,7 @@ class LocalQwenCustomVoiceBackend:
         if not len(audio) or not np.isfinite(audio).all():
             raise RuntimeError("Fine-tuned model returned empty or nonfinite audio")
         if sum(result.token_count for result in results) >= token_limit:
-            raise RuntimeError("Fine-tuned model reached its duration limit before finishing")
+            raise SynthesisDurationLimitError("Fine-tuned model reached its duration limit before finishing")
         return audio, 24000
 
 

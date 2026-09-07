@@ -74,6 +74,12 @@ identity, not a second copy of the model weights. Missing profile metadata can b
 recreated automatically. Missing or changed model files stop the render with an
 explanation, preserving existing audio instead of mixing different models.
 
+If a fine-tuned model reaches its duration limit, generation retries the affected
+unit with two fixed alternative seeds. Longer units can then use bounded smaller
+chunks. Successful first attempts keep their original audio. Exhausted recovery
+returns a specific synthesis error instead of repeating an HTTP 500 as though
+the backend were offline; incomplete model output is never saved as completed.
+
 ## Saved progress and files
 
 | Item | Location / lifetime |
@@ -110,6 +116,11 @@ This is an output choice, not a hardcoded location for all books.
   not adopt a file merely because its name looks like a completed phrase.
 - A changed model/runtime fingerprint blocks exact resume. Restore the matching
   implementation or start a new job; never rewrite saved hashes to bypass the check.
+- The reviewed `dur-v1` recovery update has one specific migration for saved
+  fine-tuned phrase jobs. After reopening the launcher, **Resume** verifies the
+  original inputs and every completed WAV, preserves the original manifest and
+  records the source runtime for reused audio. Other runtime/model changes remain
+  blocked. If the old backend is still running, restart it before resuming.
 - Failed mastering or a partial multi-voice result keeps progress. Successful
   cleanup happens only after every selected final output passes validation.
 - **Remove** removes the saved job and its owned reusable pool metadata/cache;

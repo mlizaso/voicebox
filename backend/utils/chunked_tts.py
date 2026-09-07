@@ -35,6 +35,9 @@ logger = logging.getLogger("voicebox.chunked-tts")
 DEFAULT_MAX_CHUNK_CHARS = 800
 MAX_RUNAWAY_RETRIES = 2
 MIN_RUNAWAY_RETRY_CHARS = 100
+# Recovery v1 is part of the source-bound TTS revision. Attempt zero is unchanged;
+# only exhausted codec budgets use these additional, reproducible seeds.
+_DURATION_LIMIT_SEED_OFFSETS_V1 = (0, 10_000, 20_000)
 MAX_GENERATED_AUDIO_DURATION_SECONDS = 24 * 60 * 60
 MAX_GENERATED_AUDIO_SAMPLE_RATE = 192_000
 GENERATED_AUDIO_MIN_FREE_BYTES = 1024**3
@@ -100,6 +103,10 @@ class DeterministicSynthesisError(RuntimeError):
     inference, which over a 15,000-phrase audiobook is the difference between failing in
     seconds with the real reason and failing minutes later with the wrong one.
     """
+
+
+class SynthesisDurationLimitError(DeterministicSynthesisError):
+    """The model exhausted its token budget; smaller text chunks may finish."""
 
 
 def _raise_empty_generated_audio(text: str) -> None:
@@ -657,30 +664,45 @@ async def generate_chunked(
         chunk_seed: int | None,
         retry_depth: int = 0,
     ) -> tuple[np.ndarray, int]:
-        chunk_audio, chunk_sr = await run_tts_operation_cancellation_safe(
-            backend,
-            backend.generate(
-                chunk_text,
-                voice_prompt,
-                language,
-                chunk_seed,
-                instruct,
-            ),
-        )
-        chunk_audio = np.asarray(chunk_audio, dtype=np.float32)
-        _validate_generated_audio_sample_rate(chunk_sr)
-        if chunk_audio.ndim != 1:
-            raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
-        if len(chunk_audio) == 0:
-            _raise_empty_generated_audio(chunk_text)
+        duration_error = None
+        for seed_offset in _DURATION_LIMIT_SEED_OFFSETS_V1:
+            try:
+                chunk_audio, chunk_sr = await run_tts_operation_cancellation_safe(
+                    backend,
+                    backend.generate(
+                        chunk_text,
+                        voice_prompt,
+                        language,
+                        chunk_seed if seed_offset == 0 else _offset_seed(chunk_seed, seed_offset),
+                        instruct,
+                    ),
+                )
+            except SynthesisDurationLimitError as exc:
+                duration_error = exc
+                logger.warning(
+                    "TTS duration limit for %d chars at recovery seed offset %d", len(chunk_text), seed_offset
+                )
+            else:
+                duration_error = None
+                chunk_audio = np.asarray(chunk_audio, dtype=np.float32)
+                _validate_generated_audio_sample_rate(chunk_sr)
+                if chunk_audio.ndim != 1:
+                    raise GeneratedAudioLimitError("TTS returned audio with an invalid shape")
+                if len(chunk_audio) == 0:
+                    _raise_empty_generated_audio(chunk_text)
+                break
 
-        if runaway_detector is not None and runaway_detector(chunk_audio, chunk_sr):
+        if duration_error is not None or (runaway_detector is not None and runaway_detector(chunk_audio, chunk_sr)):
             if retry_depth >= MAX_RUNAWAY_RETRIES or len(chunk_text) <= MIN_RUNAWAY_RETRY_CHARS:
+                if duration_error is not None:
+                    raise duration_error
                 raise DeterministicSynthesisError("TTS output remained unstable after retrying smaller text chunks")
 
             retry_max_chars = max(MIN_RUNAWAY_RETRY_CHARS, len(chunk_text) // 2)
             retry_chunks = split_text_into_chunks(chunk_text, retry_max_chars)
             if len(retry_chunks) <= 1:
+                if duration_error is not None:
+                    raise duration_error
                 raise RuntimeError("Unable to split unstable TTS output for retry")
 
             logger.warning(

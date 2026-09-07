@@ -36,7 +36,7 @@ MLX_AUDIO_QWEN_DTYPE_BACKPORT_VERSION = MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS["mlx-a
 # independent per-row sampling keys, immutable reference snapshots, and the
 # canonical ordered 24-kHz multi-sample prompt path. Any numerical change must
 # bump it.
-MLX_QWEN_DTYPE_PATCH_REVISION = "bf16-b2-icl-v3"
+MLX_QWEN_DTYPE_PATCH_REVISION = "bf16-b2-icl-v3-dur-v1"
 MLX_QWEN_TTS_LOCAL_NUMERICAL_SOURCE_PATHS = (
     # Request validation and exact-route mapping determine the frozen inputs
     # that reach the numerical pipeline. Model routes own the guarded
@@ -77,7 +77,7 @@ MLX_QWEN_TTS_NUMERICAL_SOURCE_FINGERPRINTS: Mapping[str, str] = MappingProxyType
         # AST fingerprints ignore comments, whitespace, and source locations,
         # while changing whenever executable source structure changes.  CI
         # verifies these embedded values before PyInstaller removes sources.
-        "voicebox-mlx": "a6fcb77b88adb4e1b7a46462b85319606e4a3cacc8bf9741574f9af52e14c1d7",
+        "voicebox-mlx": "09e5fd100901c8e78440525bb6d41d19d80f0aa53326068b878a278b3c879440",
         "mlx-audio-qwen3-tts": "ea2aaa5de132f381a1a817c8d4bd01c7fb00c431f1323606ef1f9b4394700a7e",
     }
 )

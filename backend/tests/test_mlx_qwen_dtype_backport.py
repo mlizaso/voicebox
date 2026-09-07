@@ -179,7 +179,8 @@ def test_runtime_revision_canonically_covers_package_patch_and_pinned_weights():
 
     for package, version in MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS.items():
         changed_packages = dict(MLX_QWEN_TTS_RUNTIME_PACKAGE_PINS)
-        changed_packages[package] = f"{version}.changed"
+        assert version != "0.0.0"
+        changed_packages[package] = "0.0.0"
         assert (
             build_mlx_qwen_tts_implementation_revision(runtime_packages=changed_packages)
             != MLX_QWEN_TTS_IMPLEMENTATION_REVISION
@@ -202,6 +203,11 @@ def test_runtime_revision_canonically_covers_package_patch_and_pinned_weights():
         build_mlx_qwen_tts_implementation_revision(source_fingerprints=changed_sources)
         != MLX_QWEN_TTS_IMPLEMENTATION_REVISION
     )
+
+
+def test_runtime_revision_rejects_identity_exceeding_api_limit():
+    with pytest.raises(ValueError, match="128-character limit"):
+        build_mlx_qwen_tts_implementation_revision(patch_revision="x" * 128)
 
 
 def test_runtime_revision_is_absent_when_numerical_source_is_edited(monkeypatch):
