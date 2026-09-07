@@ -2,7 +2,8 @@
 
 Run these commands in Terminal on this Mac. The first command is the normal
 one: it opens the audiobook window. Choose **New audiobook** or **Resume** in
-that window.
+that window. It reuses a compatible backend for this data folder (including
+port `17493`), or starts one on `17494`. The terminal prints the selected URL.
 
 ```bash
 cd /Users/manexlizaso/Developer/manex/voicebox
@@ -16,9 +17,12 @@ cd /Users/manexlizaso/Developer/manex/voicebox
 backend/venv/bin/python -m backend.main --host 127.0.0.1 --port 17494 --data-dir /Users/manexlizaso/Developer/manex/voicebox/data
 ```
 
-Keep that terminal open, then run the first command again.
+Keep that terminal open, then run the first command again. If a backend already
+owns the data folder and is healthy, the command automatically reuses it and
+prints its actual URL.
 
-Check the audiobook backend and its real storage paths:
+Check the audiobook backend and its real storage paths (use the port printed by
+the launcher if it is not `17494`):
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:17494/health | python3 -m json.tool

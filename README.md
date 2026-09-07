@@ -53,7 +53,8 @@ curl --fail --silent --show-error http://127.0.0.1:17493/health/filesystem \
   | python3 -m json.tool
 ```
 
-Use port **17494** for the audiobook backend. The response names `data`,
+The audiobook backend defaults to **17494**; the launcher can reuse a compatible
+backend on **17493** and prints the selected URL. The response names `data`,
 `profiles`, `generations`, and `captures`. Remote calls need a bearer token.
 Settings folder buttons work only for the local desktop connection.
 
@@ -135,6 +136,15 @@ port: the module alone defaults to **8000**. The backend CLI uses `--data-dir`;
 `VOICEBOX_DATA_DIR` is a setting of the private audiobook launcher, not a general
 backend environment override. Avoid `--reload` during real renders: source edits
 can restart the backend and interrupt generation.
+
+Only one backend can own a data directory, even on different ports. The CLI checks
+this before loading audio dependencies: a repeated local launch reuses the
+verified healthy backend and prints its actual URL, even if you requested another
+port. Add `--strict-port` when the exact requested address is required. The
+audiobook launcher discovers a compatible backend for its data folder, including
+custom ports, and retries startup if a competing owner exits while it waits. An
+explicit `VOICEBOX_URL` remains fixed. Leftover lock files after a crash are
+harmless; ownership is released by the operating system when the process exits.
 
 ```bash
 curl --fail http://127.0.0.1:17493/health
@@ -321,6 +331,7 @@ profiles, database, cache, captures, and logs private; Compose uses it for `outp
 | Symptom | First check |
 | --- | --- |
 | Profiles/history seem missing | Compare server URL, port, and `/health/filesystem`; data roots may differ. |
+| Data directory already in use | Use the reported running backend, or stop it in its terminal/app before restarting. Changing only the port does not help. |
 | First generation is slow | Check model download/load status, then `/health` for the accelerator. |
 | Book stops after a source edit | Use a stable backend without reload and resume the saved job. |
 | Exact-runtime mismatch | Restore the matching runtime or create a new job; retain existing progress/WAVs. |

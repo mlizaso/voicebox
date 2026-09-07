@@ -6,12 +6,20 @@ entry point for development.
 
 import argparse
 
-import uvicorn
+from .startup import run_server
 
-from . import config
-from .app import app  # noqa: F401 -- re-export for uvicorn "backend.main:app"
 
-if __name__ == "__main__":
+def __getattr__(name: str):
+    """Keep ``uvicorn backend.main:app`` compatible without eager ML imports."""
+    if name == "app":
+        from .app import app  # lazy: heavy import
+
+        return app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Validate configuration and ownership before loading the backend."""
     parser = argparse.ArgumentParser(description="voicebox backend server")
     parser.add_argument(
         "--host",
@@ -31,14 +39,16 @@ if __name__ == "__main__":
         default=None,
         help="Data directory for database, profiles, and generated audio",
     )
-    args = parser.parse_args()
-
-    if args.data_dir:
-        config.set_data_dir(args.data_dir)
-
-    uvicorn.run(
-        "backend.main:app",
-        host=args.host,
-        port=args.port,
-        reload=False,
+    parser.add_argument(
+        "--strict-port",
+        action="store_true",
+        help="Require the requested address instead of reusing this data folder's backend on another local port",
     )
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    return run_server(host=args.host, port=args.port, data_dir=args.data_dir, strict_port=args.strict_port)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

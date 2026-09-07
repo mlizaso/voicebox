@@ -479,8 +479,13 @@ async def _run_startup(application: FastAPI) -> None:
     config.initialize_data_permissions()
     from .data_root_lock import acquire_data_root_lock
 
-    data_root_lock = acquire_data_root_lock()
+    data_root_lock = getattr(application.state, "data_root_lock", None)
+    if data_root_lock is None or data_root_lock.released:
+        data_root_lock = acquire_data_root_lock()
+    elif data_root_lock.data_dir != config.get_data_dir():
+        raise RuntimeError("Voicebox data directory changed after startup ownership was acquired")
     application.state.data_root_lock = data_root_lock
+    data_root_lock.managed_by_lifespan = True
     try:
         database.init_db()
     except BaseException:
