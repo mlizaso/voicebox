@@ -44,6 +44,7 @@ import { authenticatedEventSource } from '@/lib/api/authenticatedFetch';
 import { apiClient } from '@/lib/api/client';
 import type { ActiveDownloadTask, HuggingFaceModelInfo, ModelStatus } from '@/lib/api/types';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
+import { invalidateModelState } from '@/lib/modelQueries';
 import { usePlatform } from '@/platform/PlatformContext';
 import { isLoopbackVoiceboxServerUrl, useServerStore } from '@/stores/serverStore';
 
@@ -226,7 +227,7 @@ export function ModelManagement() {
   const handleDownloadComplete = useCallback(() => {
     setDownloadingModel(null);
     setDownloadingDisplayName(null);
-    queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+    void invalidateModelState(queryClient);
     queryClient.invalidateQueries({ queryKey: ['activeTasks'] });
   }, [queryClient]);
 
@@ -274,7 +275,7 @@ export function ModelManagement() {
       setDownloadingModel(modelName);
       setDownloadingDisplayName(displayName);
 
-      queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+      void invalidateModelState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['activeTasks'] });
     } catch (error) {
       setDownloadingModel(null);
@@ -290,7 +291,7 @@ export function ModelManagement() {
   const cancelMutation = useMutation({
     mutationFn: (modelName: string) => apiClient.cancelDownload(modelName),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['modelStatus'], refetchType: 'all' });
+      await invalidateModelState(queryClient, 'all');
       await queryClient.invalidateQueries({ queryKey: ['activeTasks'], refetchType: 'all' });
     },
   });
@@ -334,7 +335,7 @@ export function ModelManagement() {
       setLocalErrors(new Map());
       setDownloadingModel(null);
       setDownloadingDisplayName(null);
-      await queryClient.invalidateQueries({ queryKey: ['modelStatus'], refetchType: 'all' });
+      await invalidateModelState(queryClient, 'all');
       await queryClient.invalidateQueries({ queryKey: ['activeTasks'], refetchType: 'all' });
     },
   });
@@ -355,8 +356,7 @@ export function ModelManagement() {
       setModelToDelete(null);
       setDetailOpen(false);
       setSelectedModel(null);
-      await queryClient.invalidateQueries({ queryKey: ['modelStatus'], refetchType: 'all' });
-      await queryClient.refetchQueries({ queryKey: ['modelStatus'] });
+      await invalidateModelState(queryClient, 'all');
     },
     onError: (error: Error) => {
       toast({
@@ -376,8 +376,7 @@ export function ModelManagement() {
         title: t('models.toast.unloaded'),
         description: t('models.toast.unloadedDescription', { name: modelName }),
       });
-      await queryClient.invalidateQueries({ queryKey: ['modelStatus'], refetchType: 'all' });
-      await queryClient.refetchQueries({ queryKey: ['modelStatus'] });
+      await invalidateModelState(queryClient, 'all');
     },
     onError: (error: Error) => {
       toast({

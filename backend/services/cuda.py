@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import sys
-import threading
 from pathlib import Path
 
 from .. import __version__
@@ -36,6 +35,7 @@ from ..utils.backend_archive import (
 )
 from ..utils.disk_reservations import DiskSpaceReservation, DiskSpaceReservationError, reserve_disk_space
 from ..utils.progress import get_progress_manager
+from .backend_operations import BackendOperationGuard
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,6 @@ CUDA_DOWNLOAD_UNSUPPORTED_REASON = "Downloadable CUDA backend releases are curre
 # CUDA toolkit version or torch's CUDA dependency changes (e.g. cu126 -> cu128).
 CUDA_LIBS_VERSION = "cu128-v1"
 
-_operation_state_lock = threading.Lock()
-_active_operation: tuple[object, str] | None = None
-
 
 class BackendOperationBusyError(RuntimeError):
     """Raised when a conflicting CUDA install operation already owns storage."""
@@ -61,28 +58,10 @@ class BackendAlreadyInstalledError(RuntimeError):
     """Raised when a manual install targets an already installed backend."""
 
 
-def _reserve_operation(operation: str) -> object:
-    global _active_operation
-
-    token = object()
-    with _operation_state_lock:
-        if _active_operation is not None:
-            raise BackendOperationBusyError(f"CUDA backend {_active_operation[1]} operation already in progress")
-        _active_operation = (token, operation)
-    return token
-
-
-def _release_operation(token: object) -> None:
-    global _active_operation
-
-    with _operation_state_lock:
-        if _active_operation is not None and _active_operation[0] is token:
-            _active_operation = None
-
-
-def _active_operation_name() -> str | None:
-    with _operation_state_lock:
-        return _active_operation[1] if _active_operation is not None else None
+_operations = BackendOperationGuard("CUDA", BackendOperationBusyError)
+_reserve_operation = _operations.reserve
+_release_operation = _operations.release
+_active_operation_name = _operations.active_name
 
 
 def get_backends_dir() -> Path:
@@ -467,6 +446,10 @@ async def check_and_update_cuda_binary():
     unsupported_reason = get_cuda_download_unsupported_reason()
     if unsupported_reason:
         logger.info("Skipping CUDA backend auto-update: %s", unsupported_reason)
+        return
+
+    if is_cuda_active():
+        logger.info("CUDA backend is active; skipping auto-update to avoid replacing the running backend")
         return
 
     try:

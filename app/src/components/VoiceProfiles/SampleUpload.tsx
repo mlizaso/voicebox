@@ -194,12 +194,8 @@ export function SampleUpload({ profileId, open, onOpenChange }: SampleUploadProp
     if (!newOpen) {
       form.reset();
       setMode('upload');
-      if (isRecording) {
-        cancelRecording();
-      }
-      if (isSystemRecording) {
-        cancelSystemRecording();
-      }
+      cancelRecording();
+      void cancelSystemRecording();
       cleanupAudio();
     }
     onOpenChange(newOpen);

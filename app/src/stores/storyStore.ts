@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { StoryItemDetail } from '@/lib/api/types';
+import { getStoryDurationMs } from '@/lib/story/timing';
 
 interface StoryPlaybackState {
   // Selection
@@ -56,16 +57,7 @@ export const useStoryStore = create<StoryPlaybackState>((set, get) => ({
   // Actions
   play: (storyId, items) => {
     // Calculate total duration from items
-    const maxEndTimeMs = Math.max(
-      ...items.map(
-        (item) =>
-          item.start_time_ms +
-          item.duration * 1000 -
-          (item.trim_start_ms || 0) -
-          (item.trim_end_ms || 0),
-      ),
-      0,
-    );
+    const maxEndTimeMs = getStoryDurationMs(items);
 
     // Find the minimum start time (first item)
     const minStartTimeMs = Math.min(...items.map((item) => item.start_time_ms), 0);

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import threading
 
 import pytest
@@ -7,6 +8,86 @@ from backend.backends import mlx_backend, mlx_tts_lifecycle
 from backend.mcp_server import context as mcp_context
 from backend.services import task_queue
 from backend.utils.tasks import get_task_manager
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_mode", ["waiter", "queue", "shutdown"])
+async def test_unstarted_foreground_work_is_closed_and_waiter_settled(monkeypatch, cancel_mode):
+    async def force_fail(_generation_id, _error):
+        return None
+
+    monkeypatch.setattr(task_queue, "_force_fail_if_active", force_fail)
+    task_queue.init_queue(force=True)
+    blocker_started = asyncio.Event()
+    release_blocker = asyncio.Event()
+
+    async def blocker():
+        blocker_started.set()
+        await release_blocker.wait()
+
+    async def foreground():
+        raise AssertionError("cancelled queued inference must not execute")
+
+    task_queue.enqueue_generation("blocker", blocker())
+    await asyncio.wait_for(blocker_started.wait(), timeout=1)
+    original = foreground()
+    waiter = asyncio.create_task(task_queue.run_queued_generation("foreground", original))
+    try:
+        await asyncio.sleep(0)
+        assert task_queue.generation_job_is_active("foreground")
+        if cancel_mode == "shutdown":
+            await task_queue.shutdown_background_tasks()
+        else:
+            if cancel_mode == "waiter":
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+            else:
+                assert task_queue.cancel_generation("foreground") == "queued"
+            release_blocker.set()
+            await asyncio.wait_for(task_queue._generation_queue.join(), timeout=1)
+        await asyncio.sleep(0)
+        assert inspect.getcoroutinestate(original) == inspect.CORO_CLOSED
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=1)
+        assert waiter.done()
+        assert not task_queue.generation_job_is_active("foreground")
+    finally:
+        original.close()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await task_queue.shutdown_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_foreground_cancel_before_child_first_step_closes_nested_work(monkeypatch):
+    async def force_fail(_generation_id, _error):
+        return None
+
+    async def foreground():
+        raise AssertionError("the cancelled foreground coroutine must not run")
+
+    async def cancel_before_child_runs():
+        assert task_queue.cancel_generation("foreground") == "running"
+
+    monkeypatch.setattr(task_queue, "_force_fail_if_active", force_fail)
+    task_queue.init_queue(force=True)
+    original = foreground()
+    waiter = asyncio.create_task(task_queue.run_queued_generation("foreground", original))
+    try:
+        await asyncio.sleep(0)
+        cancellation = asyncio.create_task(cancel_before_child_runs())
+        await cancellation
+        await asyncio.wait_for(task_queue._generation_queue.join(), timeout=1)
+        assert inspect.getcoroutinestate(original) == inspect.CORO_CLOSED
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=1)
+        assert waiter.done()
+    finally:
+        original.close()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await task_queue.shutdown_background_tasks()
 
 
 @pytest.mark.asyncio

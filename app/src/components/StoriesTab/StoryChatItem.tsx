@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Textarea } from '@/components/ui/textarea';
 import type { StoryItemDetail } from '@/lib/api/types';
+import { isStoryItemActive } from '@/lib/story/timing';
 import { cn } from '@/lib/utils/cn';
 import { useServerStore } from '@/stores/serverStore';
 import { useStoryStore } from '@/stores/storyStore';
@@ -45,10 +46,7 @@ export function StoryChatItem({
 
   // Check if this item is currently playing based on timecode
   const itemStartMs = item.start_time_ms;
-  const effectiveDurationMs =
-    item.duration * 1000 - (item.trim_start_ms || 0) - (item.trim_end_ms || 0);
-  const itemEndMs = item.start_time_ms + effectiveDurationMs;
-  const isCurrentlyPlaying = isPlaying && currentTimeMs >= itemStartMs && currentTimeMs < itemEndMs;
+  const isCurrentlyPlaying = isPlaying && isStoryItemActive(item, currentTimeMs);
 
   const handlePlay = () => {
     // Seek to the start of this item

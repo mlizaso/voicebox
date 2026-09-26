@@ -17,6 +17,16 @@ export function formatAudioDuration(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+/** Audio buffers remain usable after their temporary decoding context closes. */
+async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer> {
+  const context = new AudioContext();
+  try {
+    return await context.decodeAudioData(await blob.arrayBuffer());
+  } finally {
+    await context.close();
+  }
+}
+
 /**
  * Get audio duration from a File.
  * If the file has a recordedDuration property (from recording hooks),
@@ -37,14 +47,7 @@ export async function getAudioDuration(
 
   // Use Web Audio API for accurate duration — avoids VBR MP3 metadata issues.
   try {
-    const audioContext = new AudioContext();
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      return audioBuffer.duration;
-    } finally {
-      await audioContext.close();
-    }
+    return (await decodeAudioBlob(file)).duration;
   } catch {
     // Fallback: read duration from the media element (less accurate but works for WAV).
     return new Promise((resolve, reject) => {
@@ -75,22 +78,7 @@ export async function getAudioDuration(
  * This ensures compatibility without requiring ffmpeg on the backend.
  */
 export async function convertToWav(audioBlob: Blob): Promise<Blob> {
-  // Create audio context
-  const audioContext = new AudioContext();
-
-  // Read blob as array buffer
-  const arrayBuffer = await audioBlob.arrayBuffer();
-
-  // Decode audio data
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-  // Convert to WAV
-  const wavBlob = audioBufferToWav(audioBuffer);
-
-  // Close audio context to free resources
-  await audioContext.close();
-
-  return wavBlob;
+  return audioBufferToWav(await decodeAudioBlob(audioBlob));
 }
 
 /**

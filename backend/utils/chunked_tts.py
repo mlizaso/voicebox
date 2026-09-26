@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .. import config
-from ..backends.mlx_tts_lifecycle import run_tts_operation_cancellation_safe
 from .disk_reservations import DiskSpaceReservationError, reserve_disk_space
 
 if TYPE_CHECKING:
@@ -488,6 +487,9 @@ async def generate_text_batch(
     real inference failures are never hidden by a serial retry.  Each logical
     unit keeps its own seed so a saved audiobook manifest remains reproducible.
     """
+    # lazy: importing the backend package initializes the ML dependencies.
+    from ..backends.mlx_tts_lifecycle import run_tts_operation_cancellation_safe
+
     if len(texts) != 2:
         raise ValueError("model-level batching requires exactly two texts")
     if seeds is None:
@@ -658,6 +660,8 @@ async def generate_chunked(
         :func:`release_disk_backed_audio` in ``finally``; a stable single-shot
         output retains the backend's ordinary ndarray fast path.
     """
+    # lazy: text splitting and audio concatenation do not require ML backends.
+    from ..backends.mlx_tts_lifecycle import run_tts_operation_cancellation_safe
 
     async def generate_one(
         chunk_text: str,

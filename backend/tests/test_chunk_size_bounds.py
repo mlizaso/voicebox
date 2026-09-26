@@ -9,7 +9,9 @@ def test_nonpositive_chunk_size_fails_promptly():
         [
             sys.executable,
             "-c",
+            "import sys\n"
             "from backend.utils.chunked_tts import split_text_into_chunks\n"
+            "assert 'torch' not in sys.modules, 'Text splitting must not initialize ML backends'\n"
             "for size in (0, -1, -100):\n"
             "    try:\n"
             "        split_text_into_chunks('Hello world', size)\n"

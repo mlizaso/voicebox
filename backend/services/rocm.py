@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import sys
-import threading
 from pathlib import Path
 
 from .. import __version__
@@ -36,6 +35,7 @@ from ..utils.backend_archive import (
 )
 from ..utils.disk_reservations import DiskSpaceReservation, DiskSpaceReservationError, reserve_disk_space
 from ..utils.progress import get_progress_manager
+from .backend_operations import BackendOperationGuard
 
 logger = logging.getLogger(__name__)
 
@@ -47,36 +47,15 @@ PROGRESS_KEY = "rocm-backend"
 # ROCm toolkit version or torch's ROCm dependency changes (e.g. rocm7.2 -> rocm7.4).
 ROCM_LIBS_VERSION = "rocm7.2-v1"
 
-_operation_state_lock = threading.Lock()
-_active_operation: tuple[object, str] | None = None
-
 
 class BackendOperationBusyError(RuntimeError):
     """Raised when a conflicting ROCm install operation already owns storage."""
 
 
-def _reserve_operation(operation: str) -> object:
-    global _active_operation
-
-    token = object()
-    with _operation_state_lock:
-        if _active_operation is not None:
-            raise BackendOperationBusyError(f"ROCm backend {_active_operation[1]} operation already in progress")
-        _active_operation = (token, operation)
-    return token
-
-
-def _release_operation(token: object) -> None:
-    global _active_operation
-
-    with _operation_state_lock:
-        if _active_operation is not None and _active_operation[0] is token:
-            _active_operation = None
-
-
-def _active_operation_name() -> str | None:
-    with _operation_state_lock:
-        return _active_operation[1] if _active_operation is not None else None
+_operations = BackendOperationGuard("ROCm", BackendOperationBusyError)
+_reserve_operation = _operations.reserve
+_release_operation = _operations.release
+_active_operation_name = _operations.active_name
 
 
 def get_backends_dir() -> Path:

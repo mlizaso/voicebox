@@ -6,6 +6,7 @@ import { apiClient } from '@/lib/api/client';
 import { useGenerationSettings } from '@/lib/hooks/useSettings';
 import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
+import { useServerStore } from '@/stores/serverStore';
 
 interface GenerationStatusEvent {
   id: string;
@@ -27,6 +28,7 @@ const AGENT_SOURCES = new Set(['mcp', 'rest']);
 export function useGenerationProgress() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const connectionId = useServerStore((state) => state.connectionId);
   const pendingIds = useGenerationStore((s) => s.pendingGenerationIds);
   const removePendingGeneration = useGenerationStore((s) => s.removePendingGeneration);
   const removePendingStoryAdd = useGenerationStore((s) => s.removePendingStoryAdd);
@@ -43,20 +45,27 @@ export function useGenerationProgress() {
 
   // Track active EventSource instances
   const eventSourcesRef = useRef<Map<string, EventSource>>(new Map());
+  const sessionRef = useRef({ connectionId, active: false });
 
-  // Unmount-only cleanup — close all SSE connections when the hook is torn down
+  // Capture each connection lifetime so even already queued callbacks become inert.
   useEffect(() => {
     const sources = eventSourcesRef.current;
+    const session = { connectionId, active: true };
+    sessionRef.current = session;
     return () => {
+      session.active = false;
       for (const source of sources.values()) {
         source.close();
       }
       sources.clear();
     };
-  }, []);
+  }, [connectionId]);
 
   useEffect(() => {
     const currentSources = eventSourcesRef.current;
+    const session = sessionRef.current;
+    const isCurrentSession = () =>
+      session.active && connectionId === useServerStore.getState().connectionId;
 
     // Close SSE connections for IDs no longer pending
     for (const [id, source] of currentSources.entries()) {
@@ -72,8 +81,13 @@ export function useGenerationProgress() {
 
       const url = apiClient.getGenerationStatusUrl(id);
       const source = authenticatedEventSource(url);
+      const isCurrentSource = () =>
+        isCurrentSession() &&
+        currentSources.get(id) === source &&
+        useGenerationStore.getState().pendingGenerationIds.has(id);
 
       source.onmessage = (event) => {
+        if (!isCurrentSource()) return;
         try {
           const data: GenerationStatusEvent = JSON.parse(event.data);
 
@@ -91,6 +105,7 @@ export function useGenerationProgress() {
               apiClient
                 .addStoryItem(storyId, { generation_id: id })
                 .then(() => {
+                  if (!isCurrentSession()) return;
                   queryClient.invalidateQueries({ queryKey: ['stories'] });
                   queryClient.invalidateQueries({ queryKey: ['stories', storyId] });
                   toast({
@@ -101,6 +116,7 @@ export function useGenerationProgress() {
                   });
                 })
                 .catch(() => {
+                  if (!isCurrentSession()) return;
                   toast({
                     title: 'Generation complete',
                     description: 'Audio generated but failed to add to story',
@@ -144,6 +160,7 @@ export function useGenerationProgress() {
       };
 
       source.onerror = () => {
+        if (!isCurrentSource()) return;
         // SSE connection dropped — clean up and refresh history so any
         // completed/failed generation still appears in the list
         source.close();
@@ -155,6 +172,7 @@ export function useGenerationProgress() {
       currentSources.set(id, source);
     }
   }, [
+    connectionId,
     pendingIds,
     removePendingGeneration,
     removePendingStoryAdd,

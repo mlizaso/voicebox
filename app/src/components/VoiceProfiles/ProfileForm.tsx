@@ -39,6 +39,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import type { EffectConfig, PresetVoice, VoiceType } from '@/lib/api/types';
 import { LANGUAGE_CODES, LANGUAGE_OPTIONS, type LanguageCode } from '@/lib/constants/languages';
+import { useAudioDuration } from '@/lib/hooks/useAudioDuration';
 import { useAudioPlayer } from '@/lib/hooks/useAudioPlayer';
 import { useAudioRecording } from '@/lib/hooks/useAudioRecording';
 import {
@@ -150,8 +151,6 @@ export function ProfileForm() {
   const { toast } = useToast();
   const [voiceSource, setVoiceSource] = useState<'clone' | 'builtin'>('clone');
   const [sampleMode, setSampleMode] = useState<'upload' | 'record' | 'system'>('record');
-  const [audioDuration, setAudioDuration] = useState<number | null>(null);
-  const [isValidatingAudio, setIsValidatingAudio] = useState(false);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [selectedPresetEngine, setSelectedPresetEngine] = useState<string>('kokoro');
   const [selectedPresetVoiceId, setSelectedPresetVoiceId] = useState<string>('');
@@ -178,50 +177,37 @@ export function ProfileForm() {
 
   const selectedFile = form.watch('sampleFile');
   const selectedAvatarFile = form.watch('avatarFile');
+  const {
+    duration: audioDuration,
+    error: audioValidationError,
+    isLoading: isValidatingAudio,
+  } = useAudioDuration(selectedFile);
 
   // Validate audio duration when file is selected
   useEffect(() => {
-    if (selectedFile && selectedFile instanceof File) {
-      setIsValidatingAudio(true);
-      getAudioDuration(selectedFile as File & { recordedDuration?: number })
-        .then((duration) => {
-          setAudioDuration(duration);
-          if (duration > MAX_AUDIO_DURATION_SECONDS) {
-            form.setError('sampleFile', {
-              type: 'manual',
-              message: t('profileForm.validation.audioTooLong', {
-                duration: formatAudioDuration(duration),
-                max: formatAudioDuration(MAX_AUDIO_DURATION_SECONDS),
-              }),
-            });
-          } else {
-            form.clearErrors('sampleFile');
-          }
-        })
-        .catch((error) => {
-          console.error('Failed to get audio duration:', error);
-          setAudioDuration(null);
-          const isRecordedFile =
-            selectedFile.name.startsWith('recording-') ||
-            selectedFile.name.startsWith('system-audio-');
-          if (!isRecordedFile) {
-            form.setError('sampleFile', {
-              type: 'manual',
-              message: t('profileForm.validation.audioFailed'),
-            });
-          } else {
-            // Clear any existing errors for recorded files
-            form.clearErrors('sampleFile');
-          }
-        })
-        .finally(() => {
-          setIsValidatingAudio(false);
-        });
+    if (isValidatingAudio) return;
+    if (audioDuration !== null && audioDuration > MAX_AUDIO_DURATION_SECONDS) {
+      form.setError('sampleFile', {
+        type: 'manual',
+        message: t('profileForm.validation.audioTooLong', {
+          duration: formatAudioDuration(audioDuration),
+          max: formatAudioDuration(MAX_AUDIO_DURATION_SECONDS),
+        }),
+      });
+    } else if (
+      audioValidationError &&
+      selectedFile &&
+      !selectedFile.name.startsWith('recording-') &&
+      !selectedFile.name.startsWith('system-audio-')
+    ) {
+      form.setError('sampleFile', {
+        type: 'manual',
+        message: t('profileForm.validation.audioFailed'),
+      });
     } else {
-      setAudioDuration(null);
       form.clearErrors('sampleFile');
     }
-  }, [selectedFile, form, t]);
+  }, [selectedFile, audioDuration, audioValidationError, isValidatingAudio, form, t]);
 
   const {
     isRecording,
@@ -756,6 +742,12 @@ export function ProfileForm() {
   }
 
   async function handleOpenChange(newOpen: boolean) {
+    if (!newOpen) {
+      // Pending permission/start/stop requests also belong to this dialog session.
+      cancelRecording();
+      void cancelSystemRecording();
+      cleanupAudio();
+    }
     if (!newOpen && isCreating) {
       // Save draft when closing the create modal
       const values = form.getValues();
@@ -791,13 +783,6 @@ export function ProfileForm() {
     if (!newOpen) {
       setEditingProfileId(null);
       // Don't reset form here - let the effect handle it based on draft state
-      if (isRecording) {
-        cancelRecording();
-      }
-      if (isSystemRecording) {
-        cancelSystemRecording();
-      }
-      cleanupAudio();
     }
   }
 

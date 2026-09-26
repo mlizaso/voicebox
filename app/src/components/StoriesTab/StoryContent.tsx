@@ -33,6 +33,7 @@ import {
   useStory,
 } from '@/lib/hooks/useStories';
 import { useStoryPlayback } from '@/lib/hooks/useStoryPlayback';
+import { isStoryItemActive } from '@/lib/story/timing';
 import { useGenerationStore } from '@/stores/generationStore';
 import { useStoryStore } from '@/stores/storyStore';
 import { SortableStoryChatItem } from './StoryChatItem';
@@ -120,13 +121,7 @@ export function StoryContent() {
     if (!isPlaying || playbackStoryId !== story?.id || !sortedItems.length) {
       return null;
     }
-    const playingItem = sortedItems.find((item) => {
-      const itemStart = item.start_time_ms;
-      const effectiveDurationMs =
-        item.duration * 1000 - (item.trim_start_ms || 0) - (item.trim_end_ms || 0);
-      const itemEnd = item.start_time_ms + effectiveDurationMs;
-      return currentTimeMs >= itemStart && currentTimeMs < itemEnd;
-    });
+    const playingItem = sortedItems.find((item) => isStoryItemActive(item, currentTimeMs));
     return playingItem?.id ?? null;
   }, [isPlaying, playbackStoryId, story?.id, sortedItems, currentTimeMs]);
 

@@ -136,6 +136,7 @@ test('a recording cannot upload to a connection selected after it began', async 
     window: { setInterval, clearInterval, setTimeout, clearTimeout },
     MediaRecorder: FakeRecorder,
     AudioContext: class {
+      async close() {}
       async decodeAudioData() {
         throw new Error('Synthetic unsupported codec');
       }

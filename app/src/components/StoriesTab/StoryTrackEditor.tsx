@@ -38,6 +38,7 @@ import {
   useTrimStoryItem,
   useUpdateStoryItemVolume,
 } from '@/lib/hooks/useStories';
+import { getEffectiveDurationMs, getStoryDurationMs } from '@/lib/story/timing';
 import { cn } from '@/lib/utils/cn';
 import { useGenerationStore } from '@/stores/generationStore';
 import { useStoryStore } from '@/stores/storyStore';
@@ -63,7 +64,11 @@ function ClipWaveform({
 
   // Calculate the full waveform width based on the original duration
   // The visible portion (width) represents the effective duration after trimming
-  const effectiveDurationMs = duration * 1000 - trimStartMs - trimEndMs;
+  const effectiveDurationMs = getEffectiveDurationMs({
+    duration,
+    trim_start_ms: trimStartMs,
+    trim_end_ms: trimEndMs,
+  });
   const fullWaveformWidth =
     effectiveDurationMs > 0 ? (width / effectiveDurationMs) * (duration * 1000) : width;
 
@@ -333,15 +338,7 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
   // Auto-activate this story when the editor is shown so playhead is visible
   useEffect(() => {
     if (items.length > 0 && !isActiveStory) {
-      const totalDuration = Math.max(
-        ...items.map((item) => {
-          const trimStart = item.trim_start_ms || 0;
-          const trimEnd = item.trim_end_ms || 0;
-          const effectiveDuration = item.duration * 1000 - trimStart - trimEnd;
-          return item.start_time_ms + effectiveDuration;
-        }),
-        0,
-      );
+      const totalDuration = getStoryDurationMs(items);
       setActiveStory(storyId, items, totalDuration);
     }
   }, [storyId, items, isActiveStory, setActiveStory]);
@@ -447,16 +444,10 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
     return () => ro.disconnect();
   }, []);
 
-  // Calculate effective duration (accounting for trims)
-  const getEffectiveDuration = (item: StoryItemDetail) => {
-    return item.duration * 1000 - (item.trim_start_ms || 0) - (item.trim_end_ms || 0);
-  };
-
   // Calculate total duration (using effective durations)
   const totalDurationMs = useMemo(() => {
-    if (items.length === 0) return 10000; // Default 10 seconds
-    return Math.max(...items.map((item) => item.start_time_ms + getEffectiveDuration(item)), 10000);
-  }, [items, getEffectiveDuration]);
+    return Math.max(getStoryDurationMs(items), 10000); // Minimum 10-second editor viewport
+  }, [items]);
 
   // Zoom bounds are framed in seconds-of-timeline-visible-at-once (the
   // "scope") rather than abstract pixels-per-second so the bar reflects
@@ -712,7 +703,7 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
     // the backend's StoryItemSplit.split_time_ms is `int`, so round before
     // sending or pydantic rejects the request.
     const splitTimeMs = Math.round(currentTimeMs - item.start_time_ms);
-    const effectiveDuration = getEffectiveDuration(item);
+    const effectiveDuration = getEffectiveDurationMs(item);
 
     if (splitTimeMs <= 0 || splitTimeMs >= effectiveDuration) {
       toast({
@@ -742,16 +733,7 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
         },
       },
     );
-  }, [
-    selectedClipId,
-    items,
-    currentTimeMs,
-    getEffectiveDuration,
-    storyId,
-    splitItem,
-    toast,
-    setSelectedClipId,
-  ]);
+  }, [selectedClipId, items, currentTimeMs, storyId, splitItem, toast, setSelectedClipId]);
 
   const handleDuplicate = useCallback(() => {
     if (!selectedClipId) return;
@@ -955,7 +937,7 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
   const getClipStyle = (item: StoryItemDetail) => {
     const isDragging = draggingItem === item.id;
     const trackIndex = getTrackIndex(item.track);
-    const effectiveDuration = getEffectiveDuration(item);
+    const effectiveDuration = getEffectiveDurationMs(item);
     const width = msToPixels(effectiveDuration);
     const left = isDragging ? dragPosition.x : msToPixels(item.start_time_ms);
     const top = isDragging ? dragPosition.y : trackIndex * TRACK_HEIGHT;
@@ -1426,7 +1408,11 @@ export function StoryTrackEditor({ storyId, items }: StoryTrackEditorProps) {
                     : item.trim_start_ms || 0;
                 const displayTrimEnd =
                   isTrimming && tempTrimValues ? tempTrimValues.trim_end_ms : item.trim_end_ms || 0;
-                const effectiveDuration = item.duration * 1000 - displayTrimStart - displayTrimEnd;
+                const effectiveDuration = getEffectiveDurationMs({
+                  duration: item.duration,
+                  trim_start_ms: displayTrimStart,
+                  trim_end_ms: displayTrimEnd,
+                });
 
                 const style = getClipStyle({
                   ...item,

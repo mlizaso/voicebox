@@ -16,6 +16,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import type { ActiveDownloadTask } from '@/lib/api/types';
 import type { DictationReadiness, ReadinessGate } from '@/lib/hooks/useDictationReadiness';
+import { invalidateModelState } from '@/lib/modelQueries';
 import { cn } from '@/lib/utils/cn';
 
 interface RowProps {
@@ -122,8 +123,7 @@ export function DictationReadinessChecklist({
     const current = new Set(downloadByModel.keys());
     for (const name of prevActive.current) {
       if (!current.has(name)) {
-        queryClient.invalidateQueries({ queryKey: ['capture-readiness'] });
-        queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+        void invalidateModelState(queryClient);
         break;
       }
     }
@@ -138,8 +138,7 @@ export function DictationReadinessChecklist({
       // waiting for the next 5s poll. modelStatus + readiness invalidations
       // keep adjacent UI in sync.
       queryClient.invalidateQueries({ queryKey: ['activeTasks'] });
-      queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
-      queryClient.invalidateQueries({ queryKey: ['capture-readiness'] });
+      void invalidateModelState(queryClient);
       const displayName =
         vars.gate === 'stt' ? readiness.stt?.display_name : readiness.llm?.display_name;
       toast({
@@ -200,9 +199,7 @@ export function DictationReadinessChecklist({
           <h2 className="text-base font-semibold text-foreground">
             {t('captures.readiness.title')}
           </h2>
-          <p className="text-xs text-muted-foreground">
-            {t('captures.readiness.subheading')}
-          </p>
+          <p className="text-xs text-muted-foreground">{t('captures.readiness.subheading')}</p>
         </div>
       )}
 
@@ -283,5 +280,4 @@ export function DictationReadinessChecklist({
   );
 }
 
-const isMacOS =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
+const isMacOS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);

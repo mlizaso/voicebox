@@ -3,6 +3,7 @@ import { toast } from '@/components/ui/use-toast';
 import { loadAudioSource, releaseAudioSource } from '@/lib/api/audioSource';
 import { apiClient } from '@/lib/api/client';
 import type { StoryItemDetail } from '@/lib/api/types';
+import { getItemEndMs, isStoryItemActive } from '@/lib/story/timing';
 import { useStoryStore } from '@/stores/storyStore';
 
 interface ActiveSource {
@@ -118,15 +119,7 @@ export function useStoryPlayback() {
   // Find ALL items that should be playing at a given story time
   const findActiveItems = useCallback(
     (storyTimeMs: number, itemList: StoryItemDetail[]): StoryItemDetail[] => {
-      return itemList.filter((item) => {
-        const itemStart = item.start_time_ms;
-        // Use effective duration (accounting for trims)
-        const trimStartMs = item.trim_start_ms || 0;
-        const trimEndMs = item.trim_end_ms || 0;
-        const effectiveDurationMs = item.duration * 1000 - trimStartMs - trimEndMs;
-        const itemEnd = item.start_time_ms + effectiveDurationMs;
-        return storyTimeMs >= itemStart && storyTimeMs < itemEnd;
-      });
+      return itemList.filter((item) => isStoryItemActive(item, storyTimeMs));
     },
     [],
   );
@@ -183,9 +176,7 @@ export function useStoryPlayback() {
         if (!activeSourcesRef.current.has(item.id)) {
           // Calculate effective duration and trim offsets
           const trimStartSec = (item.trim_start_ms || 0) / 1000;
-          const trimEndSec = (item.trim_end_ms || 0) / 1000;
-          const effectiveDuration = item.duration - trimStartSec - trimEndSec;
-          const itemEndStoryTime = item.start_time_ms + effectiveDuration * 1000;
+          const itemEndStoryTime = getItemEndMs(item);
 
           const audio = new Audio();
           audio.crossOrigin = 'anonymous';

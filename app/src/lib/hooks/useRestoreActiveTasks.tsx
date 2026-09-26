@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apiClient } from '@/lib/api/client';
 import type { ActiveDownloadTask } from '@/lib/api/types';
 import { useGenerationStore } from '@/stores/generationStore';
+import { useServerStore } from '@/stores/serverStore';
 
 // Polling interval in milliseconds
 const POLL_INTERVAL = 30000;
@@ -14,64 +15,56 @@ const POLL_INTERVAL = 30000;
  * Returns the active downloads so components can render download toasts.
  */
 export function useRestoreActiveTasks() {
-  const [activeDownloads, setActiveDownloads] = useState<ActiveDownloadTask[]>([]);
+  const connectionId = useServerStore((state) => state.connectionId);
+  const [activeDownloads, setActiveDownloads] = useState<{
+    connectionId: string;
+    downloads: ActiveDownloadTask[];
+  }>({ connectionId, downloads: [] });
   const setActiveGenerationId = useGenerationStore((state) => state.setActiveGenerationId);
   const addPendingGeneration = useGenerationStore((state) => state.addPendingGeneration);
 
-  // Track which downloads we've seen to detect new ones
-  const seenDownloadsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let active = true;
+    let fetching = false;
+    const fetchActiveTasks = async () => {
+      if (!active || fetching || connectionId !== useServerStore.getState().connectionId) return;
+      fetching = true;
+      try {
+        const tasks = await apiClient.getActiveTasks();
+        if (!active || connectionId !== useServerStore.getState().connectionId) return;
 
-  const fetchActiveTasks = useCallback(async () => {
-    try {
-      const tasks = await apiClient.getActiveTasks();
-
-      // Restore pending generations (e.g., after page refresh)
-      if (tasks.generations.length > 0) {
-        setActiveGenerationId(tasks.generations[0].task_id);
-        for (const gen of tasks.generations) {
-          addPendingGeneration(gen.task_id);
-        }
-      } else {
-        const currentId = useGenerationStore.getState().activeGenerationId;
-        if (currentId) {
+        // Restore pending generations (e.g., after page refresh).
+        if (tasks.generations.length > 0) {
+          setActiveGenerationId(tasks.generations[0].task_id);
+          for (const gen of tasks.generations) {
+            addPendingGeneration(gen.task_id);
+          }
+        } else {
           setActiveGenerationId(null);
         }
-      }
 
-      // Update active downloads
-      // Keep track of all active downloads (including new ones)
-      const currentDownloadNames = new Set(tasks.downloads.map((d) => d.model_name));
-
-      // Remove completed downloads from our seen set
-      for (const name of seenDownloadsRef.current) {
-        if (!currentDownloadNames.has(name)) {
-          seenDownloadsRef.current.delete(name);
+        setActiveDownloads({ connectionId, downloads: tasks.downloads });
+      } catch (error) {
+        if (active && connectionId === useServerStore.getState().connectionId) {
+          // The server might be temporarily unavailable.
+          console.debug('Failed to fetch active tasks:', error);
         }
+      } finally {
+        fetching = false;
       }
+    };
 
-      // Add new downloads to seen set
-      for (const download of tasks.downloads) {
-        seenDownloadsRef.current.add(download.model_name);
-      }
-
-      setActiveDownloads(tasks.downloads);
-    } catch (error) {
-      // Silently fail - server might be temporarily unavailable
-      console.debug('Failed to fetch active tasks:', error);
-    }
-  }, [setActiveGenerationId, addPendingGeneration]);
-
-  useEffect(() => {
-    // Fetch immediately on mount
+    // Fetch immediately for each connection and avoid overlapping polls.
     fetchActiveTasks();
-
-    // Poll for active tasks
     const interval = setInterval(fetchActiveTasks, POLL_INTERVAL);
 
-    return () => clearInterval(interval);
-  }, [fetchActiveTasks]);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [connectionId, setActiveGenerationId, addPendingGeneration]);
 
-  return activeDownloads;
+  return activeDownloads.connectionId === connectionId ? activeDownloads.downloads : [];
 }
 
 /**

@@ -1,10 +1,11 @@
-import { Mic, Pause, Play, Square } from 'lucide-react';
+import { Mic, Square } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Visualizer } from 'react-sound-visualizer';
 import { Button } from '@/components/ui/button';
 import { FormControl, FormItem, FormMessage } from '@/components/ui/form';
 import { formatAudioDuration } from '@/lib/utils/audio';
+import { AudioSamplePreview } from './AudioSamplePreview';
 
 const MemoizedWaveform = memo(function MemoizedWaveform({
   audioStream,
@@ -102,42 +103,17 @@ export function AudioSampleRecording({
 
           {file && !isRecording && (
             <div className="flex flex-col items-center justify-center gap-4 p-4 border-2 border-primary rounded-lg bg-primary/5 min-h-[180px]">
-              <div className="flex items-center gap-2">
-                <Mic className="h-5 w-5 text-primary" />
-                <span className="font-medium">{t('audioSample.recordingComplete')}</span>
-              </div>
-              <p className="text-sm text-muted-foreground text-center">
-                {t('audioSample.fileLabel', { name: file.name })}
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="outline"
-                  onClick={onPlayPause}
-                  aria-label={isPlaying ? t('audioSample.pause') : t('audioSample.play')}
-                >
-                  {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={onTranscribe}
-                  disabled={isTranscribing}
-                  className="flex items-center gap-2"
-                >
-                  <Mic className="h-4 w-4" />
-                  {isTranscribing ? t('audioSample.transcribing') : t('audioSample.transcribe')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={onCancel}
-                  className="flex items-center gap-2"
-                >
-                  {t('audioSample.recordAgain')}
-                </Button>
-              </div>
+              <AudioSamplePreview
+                file={file}
+                icon={<Mic className="h-5 w-5 text-primary" />}
+                label={t('audioSample.recordingComplete')}
+                actionLabel={t('audioSample.recordAgain')}
+                onAction={onCancel}
+                onPlayPause={onPlayPause}
+                onTranscribe={onTranscribe}
+                isPlaying={isPlaying}
+                isTranscribing={isTranscribing}
+              />
             </div>
           )}
         </div>

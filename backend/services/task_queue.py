@@ -21,6 +21,21 @@ class GenerationJob:
 
     generation_ids: tuple[str, ...]
     coro: Coroutine
+    on_close: Callable[[], None] | None = None
+
+    def close(self) -> None:
+        """Release unstarted nested work as well as the queue's coroutine."""
+        on_close, self.on_close = self.on_close, None
+        try:
+            self.coro.close()
+        finally:
+            if on_close is not None:
+                try:
+                    on_close()
+                except Exception:
+                    # A cleanup callback must not strand queue ownership or
+                    # task_done(), but its failure must remain observable.
+                    traceback.print_exc()
 
 
 # Generation queue — serializes TTS inference to avoid GPU contention
@@ -77,7 +92,6 @@ async def _generation_worker(
         try:
             if any(generation_id in cancelled_generation_ids for generation_id in job.generation_ids):
                 cancelled_generation_ids.difference_update(job.generation_ids)
-                job.coro.close()
                 for generation_id in job.generation_ids:
                     await _force_fail_if_active(
                         generation_id,
@@ -116,6 +130,7 @@ async def _generation_worker(
             # single instruction.  In that case none of the generation
             # service's status/task cleanup handlers run. Reconcile every row
             # while this queue still owns the IDs, then release ownership.
+            job.close()
             from ..utils.tasks import get_task_manager
 
             task_manager = get_task_manager()
@@ -160,9 +175,9 @@ async def _force_fail_if_active(generation_id: str, error: str) -> None:
         traceback.print_exc()
 
 
-def enqueue_generation(generation_id: str, coro):
+def enqueue_generation(generation_id: str, coro, *, on_close: Callable[[], None] | None = None):
     """Add a generation coroutine to the serial queue."""
-    enqueue_generation_batch((generation_id,), coro)
+    enqueue_generation_batch((generation_id,), coro, on_close=on_close)
 
 
 async def run_queued_generation(
@@ -203,9 +218,18 @@ async def run_queued_generation(
             else:
                 discard(value)
 
+    def close_foreground_work() -> None:
+        # A wrapper cancelled before its first instruction never reaches its
+        # await/catch block. The queue must settle the waiter in that case too.
+        try:
+            coro.close()
+        finally:
+            if not result.done():
+                result.cancel()
+
     wrapper = queued_work()
     try:
-        enqueue_generation(generation_id, wrapper)
+        enqueue_generation(generation_id, wrapper, on_close=close_foreground_work)
     except BaseException:
         wrapper.close()
         coro.close()
@@ -227,7 +251,12 @@ async def run_queued_generation(
         raise
 
 
-def enqueue_generation_batch(generation_ids: tuple[str, ...], coro) -> None:
+def enqueue_generation_batch(
+    generation_ids: tuple[str, ...],
+    coro,
+    *,
+    on_close: Callable[[], None] | None = None,
+) -> None:
     """Queue one inference coroutine that atomically owns multiple rows."""
     if not _accepting_background_tasks:
         coro.close()
@@ -243,7 +272,7 @@ def enqueue_generation_batch(generation_ids: tuple[str, ...], coro) -> None:
         raise ValueError("generation is already queued or running")
 
     try:
-        _generation_queue.put_nowait(GenerationJob(generation_ids=generation_ids, coro=coro))
+        _generation_queue.put_nowait(GenerationJob(generation_ids=generation_ids, coro=coro, on_close=on_close))
     except asyncio.QueueFull as exc:
         raise GenerationQueueFullError(
             "Generation queue is full; wait for queued work to finish before submitting more"
@@ -337,7 +366,7 @@ async def shutdown_background_tasks() -> None:
                 job = _generation_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            job.coro.close()
+            job.close()
             for generation_id in job.generation_ids:
                 await _force_fail_if_active(
                     generation_id,

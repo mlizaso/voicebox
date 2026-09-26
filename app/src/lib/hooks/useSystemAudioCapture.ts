@@ -6,6 +6,13 @@ interface UseSystemAudioCaptureOptions {
   onRecordingComplete?: (blob: Blob, duration?: number) => void;
 }
 
+interface CaptureSession {
+  cancelled: boolean;
+  startedAt: number | null;
+  stopping: boolean;
+  onComplete: UseSystemAudioCaptureOptions['onRecordingComplete'];
+}
+
 /**
  * Hook for native system audio capture using Tauri commands.
  * Uses ScreenCaptureKit on macOS and WASAPI loopback on Windows.
@@ -20,12 +27,8 @@ export function useSystemAudioCapture({
   const [error, setError] = useState<string | null>(null);
   const [isSupported, setIsSupported] = useState(false);
   const timerRef = useRef<number | null>(null);
-  const startTimeRef = useRef<number | null>(null);
   const stopRecordingRef = useRef<(() => Promise<void>) | null>(null);
-  const isRecordingRef = useRef(false);
-  const startingRef = useRef(false);
-  const epochRef = useRef(0);
-  const cancelledRef = useRef(false);
+  const sessionRef = useRef<CaptureSession | null>(null);
 
   // Check if system audio capture is supported
   useEffect(() => {
@@ -50,7 +53,8 @@ export function useSystemAudioCapture({
   }, [platform]);
 
   const startRecording = useCallback(async () => {
-    if (startingRef.current || isRecordingRef.current) return;
+    // A pending native stop still owns the capture device.
+    if (sessionRef.current) return;
     if (!platform.metadata.isTauri) {
       const errorMsg = 'System audio capture is only available in the desktop app.';
       setError(errorMsg);
@@ -63,28 +67,32 @@ export function useSystemAudioCapture({
       return;
     }
 
-    startingRef.current = true;
-    cancelledRef.current = false;
-    const epoch = epochRef.current;
+    const session: CaptureSession = {
+      cancelled: false,
+      startedAt: null,
+      stopping: false,
+      onComplete: onRecordingComplete,
+    };
+    sessionRef.current = session;
     try {
       setError(null);
       setDuration(0);
 
       // Start native capture
       await platform.audio.startSystemAudioCapture(maxDurationSeconds);
-      if (epoch !== epochRef.current) {
+      if (session.cancelled) {
         await platform.audio.stopSystemAudioCapture();
+        if (sessionRef.current === session) sessionRef.current = null;
         return;
       }
 
       setIsRecording(true);
-      isRecordingRef.current = true;
-      startTimeRef.current = Date.now();
+      session.startedAt = Date.now();
 
       // Start timer
       timerRef.current = window.setInterval(() => {
-        if (startTimeRef.current) {
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
+        if (session.startedAt !== null) {
+          const elapsed = (Date.now() - session.startedAt) / 1000;
           setDuration(elapsed);
 
           // Auto-stop at max duration
@@ -94,26 +102,30 @@ export function useSystemAudioCapture({
         }
       }, 100);
     } catch (err) {
+      if (sessionRef.current === session) sessionRef.current = null;
+      if (session.cancelled) {
+        console.error('Error releasing cancelled system audio capture:', err);
+        return;
+      }
       const errorMessage =
         err instanceof Error
           ? err.message
           : 'Failed to start system audio capture. Please check permissions.';
       setError(errorMessage);
       setIsRecording(false);
-    } finally {
-      startingRef.current = false;
     }
-  }, [maxDurationSeconds, isSupported, platform]);
+  }, [maxDurationSeconds, isSupported, onRecordingComplete, platform]);
 
   const stopRecording = useCallback(async () => {
-    if (!isRecordingRef.current || !platform.metadata.isTauri) {
+    const session = sessionRef.current;
+    if (!session || session.startedAt === null || session.stopping) {
       return;
     }
 
-    const cancelled = cancelledRef.current;
+    session.stopping = true;
+    const recordedDuration = (Date.now() - session.startedAt) / 1000;
     try {
-      setIsRecording(false);
-      isRecordingRef.current = false;
+      if (!session.cancelled) setIsRecording(false);
 
       if (timerRef.current !== null) {
         clearInterval(timerRef.current);
@@ -123,17 +135,19 @@ export function useSystemAudioCapture({
       // Stop capture and get Blob
       const blob = await platform.audio.stopSystemAudioCapture();
 
-      // Pass the actual recorded duration
-      const recordedDuration = startTimeRef.current
-        ? (Date.now() - startTimeRef.current) / 1000
-        : undefined;
-      if (!cancelled) onRecordingComplete?.(blob, recordedDuration);
+      if (!session.cancelled) session.onComplete?.(blob, recordedDuration);
     } catch (err) {
+      if (session.cancelled) {
+        console.error('Error stopping cancelled system audio capture:', err);
+        return;
+      }
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to stop system audio capture.';
       setError(errorMessage);
+    } finally {
+      if (sessionRef.current === session) sessionRef.current = null;
     }
-  }, [onRecordingComplete, platform]);
+  }, [platform]);
 
   // Store stopRecording in ref for use in timer
   useEffect(() => {
@@ -141,39 +155,29 @@ export function useSystemAudioCapture({
   }, [stopRecording]);
 
   const cancelRecording = useCallback(async () => {
-    epochRef.current += 1;
-    cancelledRef.current = true;
-    if (isRecordingRef.current) {
-      await stopRecording();
-    }
+    if (sessionRef.current) sessionRef.current.cancelled = true;
 
     setIsRecording(false);
-    isRecordingRef.current = false;
     setDuration(0);
 
     if (timerRef.current !== null) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    await stopRecording();
   }, [stopRecording]);
 
   // Cleanup on unmount only
   useEffect(() => {
     return () => {
-      epochRef.current += 1;
+      if (sessionRef.current) sessionRef.current.cancelled = true;
       if (timerRef.current !== null) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
-      // Cancel recording on unmount if still recording
-      if (isRecordingRef.current && platform.metadata.isTauri) {
-        // Call stop directly without the callback to avoid stale closure
-        platform.audio.stopSystemAudioCapture().catch((err) => {
-          console.error('Error stopping audio capture on unmount:', err);
-        });
-      }
+      void stopRecording();
     };
-  }, [platform]);
+  }, [stopRecording]);
 
   return {
     isRecording,

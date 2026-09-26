@@ -1,61 +1,79 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useToast } from '@/components/ui/use-toast';
+
+interface PreviewSession {
+  file: File;
+  audio: HTMLAudioElement;
+  url: string;
+  playing: boolean;
+  attempt: number;
+}
 
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const sessionRef = useRef<PreviewSession | null>(null);
   const { toast } = useToast();
+
+  const release = useCallback(() => {
+    const session = sessionRef.current;
+    sessionRef.current = null;
+    if (!session) return;
+    session.audio.pause();
+    session.audio.removeAttribute('src');
+    session.audio.load();
+    URL.revokeObjectURL(session.url);
+  }, []);
+
+  useEffect(() => release, [release]);
+
+  const cleanup = useCallback(() => {
+    release();
+    setIsPlaying(false);
+  }, [release]);
 
   const playPause = (file: File | null | undefined) => {
     if (!file) return;
-
-    if (audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-        setIsPlaying(false);
-      } else {
-        audioRef.current.play();
-        setIsPlaying(true);
-      }
-    } else {
-      const audio = new Audio(URL.createObjectURL(file));
-      audioRef.current = audio;
-
-      audio.addEventListener('ended', () => {
-        setIsPlaying(false);
-        if (audioRef.current) {
-          URL.revokeObjectURL(audioRef.current.src);
-        }
-        audioRef.current = null;
+    let session = sessionRef.current;
+    if (session?.file !== file) {
+      cleanup();
+      const url = URL.createObjectURL(file);
+      session = { file, audio: new Audio(url), url, playing: false, attempt: 0 };
+      sessionRef.current = session;
+      const current = session;
+      current.audio.addEventListener('ended', () => {
+        if (sessionRef.current === current) cleanup();
       });
-
-      audio.addEventListener('error', () => {
-        setIsPlaying(false);
+      current.audio.addEventListener('error', () => {
+        if (sessionRef.current !== current) return;
+        cleanup();
         toast({
           title: 'Playback error',
           description: 'Failed to play audio file',
           variant: 'destructive',
         });
-        if (audioRef.current) {
-          URL.revokeObjectURL(audioRef.current.src);
-        }
-        audioRef.current = null;
       });
-
-      audio.play();
-      setIsPlaying(true);
     }
-  };
 
-  const cleanup = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      if (audioRef.current.src.startsWith('blob:')) {
-        URL.revokeObjectURL(audioRef.current.src);
-      }
-      audioRef.current = null;
+    const current = session;
+    const attempt = ++current.attempt;
+    if (current.playing) {
+      current.playing = false;
+      current.audio.pause();
+      setIsPlaying(false);
+      return;
     }
-    setIsPlaying(false);
+
+    current.playing = true;
+    setIsPlaying(true);
+    void current.audio.play().catch(() => {
+      if (sessionRef.current !== current || current.attempt !== attempt) return;
+      cleanup();
+      toast({
+        title: 'Playback error',
+        description: 'Failed to play audio file',
+        variant: 'destructive',
+      });
+    });
   };
 
   return {

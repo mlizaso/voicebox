@@ -11,6 +11,7 @@ import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useGenerationSettings } from '@/lib/hooks/useSettings';
 import { isFinetunedVoice } from '@/lib/utils/finetunedVoice';
 import { useGenerationStore } from '@/stores/generationStore';
+import { useServerStore } from '@/stores/serverStore';
 import { useUIStore } from '@/stores/uiStore';
 
 const generationSchema = z.object({
@@ -87,6 +88,13 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       return;
     }
 
+    const connectionId = useServerStore.getState().connectionId;
+    const assertConnection = () => {
+      if (useServerStore.getState().connectionId !== connectionId) {
+        throw new Error('Connection changed. Generate again on the selected server.');
+      }
+    };
+
     try {
       const engine = data.engine || 'qwen';
       const localVoice =
@@ -134,7 +142,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         const modelStatus = localVoice ? null : await apiClient.getModelStatus();
         const model = modelStatus?.models.find((m) => m.model_name === modelName);
 
-        if (model && !model.downloaded) {
+        if (model && !model.downloaded && useServerStore.getState().connectionId === connectionId) {
           setDownloadingModelName(modelName);
           setDownloadingDisplayName(displayName);
         }
@@ -142,6 +150,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         console.error('Failed to check model status:', error);
       }
 
+      assertConnection();
       const hasModelSizes =
         engine === 'qwen' || engine === 'qwen_custom_voice' || engine === 'tada';
       // Only Qwen CustomVoice actually honors the instruct kwarg at model level.
@@ -164,6 +173,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         effects_chain: effectsChain?.length ? effectsChain : undefined,
       });
 
+      assertConnection();
       // Track this generation for SSE status updates
       addPendingGeneration(result.id);
 

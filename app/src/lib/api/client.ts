@@ -1,6 +1,7 @@
 import type { LanguageCode } from '@/lib/constants/languages';
 import { useServerStore } from '@/stores/serverStore';
 import { authenticatedFetch } from './authenticatedFetch';
+import { assertApiResponse } from './responseError';
 import type {
   ActiveTasksResponse,
   ApplyEffectsRequest,
@@ -56,21 +57,6 @@ import type {
   WhisperModelSize,
 } from './types';
 
-function formatErrorDetail(detail: unknown, fallback: string): string {
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail)) {
-    return detail
-      .map((e: Record<string, unknown>) => e.msg || e.message || JSON.stringify(e))
-      .join('; ');
-  }
-  if (detail && typeof detail === 'object') {
-    const obj = detail as Record<string, unknown>;
-    if (typeof obj.message === 'string') return obj.message;
-    return JSON.stringify(detail);
-  }
-  return fallback;
-}
-
 class ApiClient {
   private getBaseUrl(): string {
     const serverUrl = useServerStore.getState().serverUrl;
@@ -87,12 +73,7 @@ class ApiClient {
       },
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -161,12 +142,7 @@ class ApiClient {
       body: formData,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -195,12 +171,7 @@ class ApiClient {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/export`;
     const response = await authenticatedFetch(url);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response;
   }
@@ -215,12 +186,7 @@ class ApiClient {
       body: formData,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -235,12 +201,7 @@ class ApiClient {
       body: formData,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -331,12 +292,7 @@ class ApiClient {
     const url = `${this.getBaseUrl()}/history/${generationId}/export`;
     const response = await authenticatedFetch(url);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response;
   }
@@ -345,12 +301,7 @@ class ApiClient {
     const url = `${this.getBaseUrl()}/history/${generationId}/export-audio`;
     const response = await authenticatedFetch(url);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response;
   }
@@ -371,12 +322,7 @@ class ApiClient {
       body: formData,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -416,12 +362,7 @@ class ApiClient {
       body: formData,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.json();
   }
@@ -451,12 +392,7 @@ class ApiClient {
 
     const url = `${this.getBaseUrl()}/captures`;
     const response = await authenticatedFetch(url, { method: 'POST', body: formData });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
     return response.json();
   }
 
@@ -825,12 +761,7 @@ class ApiClient {
     const url = `${this.getBaseUrl()}/stories/${storyId}/export-audio`;
     const response = await authenticatedFetch(url);
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response;
   }
@@ -922,12 +853,7 @@ class ApiClient {
       body: JSON.stringify({ effects_chain: effectsChain }),
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(formatErrorDetail(error.detail, `HTTP error! status: ${response.status}`));
-    }
+    await assertApiResponse(response);
 
     return response.blob();
   }

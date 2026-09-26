@@ -10,12 +10,51 @@ import pytest
 from fastapi import HTTPException
 
 from backend.routes import cuda as cuda_routes, rocm as rocm_routes
-from backend.services import cuda, rocm
+from backend.services import cuda, rocm, task_queue
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", [cuda, rocm], ids=["cuda", "rocm"])
+async def test_auto_update_does_not_replace_the_running_backend(service, monkeypatch, tmp_path):
+    backend_name = service.__name__.rsplit(".", 1)[-1]
+    monkeypatch.setenv("VOICEBOX_BACKEND_VARIANT", backend_name)
+    monkeypatch.setattr(service, "get_backends_dir", lambda: tmp_path)
+    if service is cuda:
+        monkeypatch.setattr(cuda, "get_cuda_download_unsupported_reason", lambda: None)
+
+    def unexpected_recovery(*_args):
+        raise AssertionError("running installation must not enter storage recovery or replacement")
+
+    monkeypatch.setattr(service, "recover_backend_install", unexpected_recovery)
+    await getattr(service, f"check_and_update_{backend_name}_binary")()
+
+
+def test_backend_operation_ownership_is_independent_and_rejects_stale_releases():
+    cuda_token = cuda._reserve_operation("download")
+    rocm_token = rocm._reserve_operation("delete")
+    replacement = None
+    try:
+        cuda._release_operation(rocm_token)
+        rocm._release_operation(cuda_token)
+        assert cuda._active_operation_name() == "download"
+        assert rocm._active_operation_name() == "delete"
+        with pytest.raises(cuda.BackendOperationBusyError, match="CUDA backend download"):
+            cuda._reserve_operation("update")
+        with pytest.raises(rocm.BackendOperationBusyError, match="ROCm backend delete"):
+            rocm._reserve_operation("update")
+        cuda._release_operation(cuda_token)
+        replacement = cuda._reserve_operation("recovery")
+        cuda._release_operation(cuda_token)
+        assert cuda._active_operation_name() == "recovery"
+    finally:
+        cuda._release_operation(replacement if replacement is not None else cuda_token)
+        rocm._release_operation(rocm_token)
 
 
 @pytest.fixture(params=[cuda, rocm], ids=["cuda", "rocm"])
 def backend_service(request, tmp_path: Path, monkeypatch) -> ModuleType:
     service = request.param
+    monkeypatch.setattr(task_queue, "_accepting_background_tasks", True)
     monkeypatch.setattr(service, "get_backends_dir", lambda: tmp_path / service.__name__.rsplit(".", 1)[-1])
     if service is cuda:
         monkeypatch.setattr(cuda.sys, "platform", "win32")
