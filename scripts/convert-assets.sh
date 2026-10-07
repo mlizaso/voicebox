@@ -105,35 +105,35 @@ for dir in "${DIRS[@]}"; do
   # Find and convert PNGs (recursively)
   while IFS= read -r -d '' file; do
     if convert_png "$file"; then
-      ((png_converted++))
+      png_converted=$((png_converted + 1))
     else
-      ((png_failed++))
+      png_failed=$((png_failed + 1))
     fi
   done < <(find "$dir" -type f -name "*.png" -print0 2>/dev/null)
   
   # Find and convert MOVs (recursively)
   while IFS= read -r -d '' file; do
     if convert_mov "$file"; then
-      ((mov_converted++))
+      mov_converted=$((mov_converted + 1))
     else
-      ((mov_failed++))
+      mov_failed=$((mov_failed + 1))
     fi
   done < <(find "$dir" -type f -name "*.mov" -print0 2>/dev/null)
   
   # Also check for uppercase extensions
   while IFS= read -r -d '' file; do
     if convert_png "$file"; then
-      ((png_converted++))
+      png_converted=$((png_converted + 1))
     else
-      ((png_failed++))
+      png_failed=$((png_failed + 1))
     fi
   done < <(find "$dir" -type f -name "*.PNG" -print0 2>/dev/null)
   
   while IFS= read -r -d '' file; do
     if convert_mov "$file"; then
-      ((mov_converted++))
+      mov_converted=$((mov_converted + 1))
     else
-      ((mov_failed++))
+      mov_failed=$((mov_failed + 1))
     fi
   done < <(find "$dir" -type f -name "*.MOV" -print0 2>/dev/null)
   

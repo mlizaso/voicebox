@@ -159,13 +159,25 @@ export function useGenerationProgress() {
         }
       };
 
-      source.onerror = () => {
+      source.onerror = (event) => {
         if (!isCurrentSource()) return;
-        // SSE connection dropped — clean up and refresh history so any
-        // completed/failed generation still appears in the list
-        source.close();
-        currentSources.delete(id);
-        removePendingGeneration(id);
+        // EventSource reconnects after transient transport failures. Keep the
+        // generation/story intent until a terminal event arrives: completed
+        // tasks disappear from /tasks/active and cannot be restored by polling.
+        if (source.readyState === source.CLOSED) {
+          // Authentication/protocol rejections are terminal for EventSource.
+          // Surface the lost subscription rather than keep an endless spinner.
+          source.close();
+          currentSources.delete(id);
+          removePendingGeneration(id);
+          removePendingStoryAdd(id);
+          toast({
+            title: 'Generation status connection closed',
+            description:
+              event?.message || 'Check the connection and find the generated audio in history.',
+            variant: 'destructive',
+          });
+        }
         queryClient.refetchQueries({ queryKey: ['history'] });
       };
 

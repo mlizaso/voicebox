@@ -18,6 +18,7 @@ export function AudioPlayer() {
   const volumeLabelId = useId();
   const {
     audioUrl,
+    audioSourceKind,
     audioId,
     profileId,
     isPlaying,
@@ -69,6 +70,8 @@ export function AudioPlayer() {
 
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
+  const audioLoadRef = useRef<AbortController | null>(null);
+  const waveformSourceRef = useRef('');
   const loadingRef = useRef(false);
   const previousAudioIdRef = useRef<string | null>(null);
   const hasInitializedRef = useRef(false);
@@ -78,7 +81,9 @@ export function AudioPlayer() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
+  const isPlayerVisible = audioUrl !== null;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Each track ends any pending native playback.
   useEffect(() => {
     setNativeStartPending(false);
     return () => {
@@ -93,16 +98,20 @@ export function AudioPlayer() {
     };
   }, [audioUrl, platform.audio]);
 
-  // Create WaveSurfer once when the player becomes visible (audioUrl is set).
-  // This instance is reused for all subsequent audio loads - never destroyed until unmount.
+  // Reuse WaveSurfer for track changes while the waveform container exists.
+  // Closing removes that container, so its instance must be disposed as well.
   useEffect(() => {
-    if (!audioUrl) return;
-    if (wavesurferRef.current) return; // already created
+    if (!isPlayerVisible) return;
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposeMedia: (() => void) | undefined;
 
     const initWaveSurfer = () => {
+      retryTimer = null;
+      if (!active) return;
       const container = waveformRef.current;
       if (!container) {
-        setTimeout(initWaveSurfer, 50);
+        retryTimer = setTimeout(initWaveSurfer, 50);
         return;
       }
 
@@ -115,7 +124,7 @@ export function AudioPlayer() {
         style.visibility !== 'hidden';
 
       if (!isVisible) {
-        setTimeout(initWaveSurfer, 50);
+        retryTimer = setTimeout(initWaveSurfer, 50);
         return;
       }
 
@@ -191,6 +200,8 @@ export function AudioPlayer() {
 
         wavesurfer.on('play', () => setIsPlaying(true));
         wavesurfer.on('pause', () => {
+          // A reset has already cleared playback; disposal must not restore its position.
+          if (usePlayerStore.getState().audioUrl === null) return;
           setIsPlaying(false);
           setCurrentTime(wavesurfer.getCurrentTime());
         });
@@ -206,6 +217,16 @@ export function AudioPlayer() {
         const seekGain: GainNode | null = seekMedia?.getGainNode?.() ?? null;
         if (seekGain) {
           const ctx = seekGain.context as AudioContext;
+          // This backend/context was created solely for this WaveSurfer instance.
+          disposeMedia = () => {
+            const internalSource = seekMedia.currentSrc || seekMedia.src;
+            if (internalSource !== waveformSourceRef.current) releaseAudioSource(internalSource);
+            seekMedia.removeAttribute('src');
+            seekGain.disconnect();
+            if (ctx.state !== 'closed') {
+              void ctx.close().catch((err) => debug.error('Error closing waveform audio:', err));
+            }
+          };
           wavesurfer.on('dragstart', () => {
             seekGain.gain.cancelScheduledValues(ctx.currentTime);
             seekGain.gain.setTargetAtTime(0, ctx.currentTime, 0.002);
@@ -249,34 +270,45 @@ export function AudioPlayer() {
       }
     };
 
-    let rafId: number;
-    rafId = requestAnimationFrame(() => {
+    const rafId = requestAnimationFrame(() => {
       initWaveSurfer();
     });
 
     return () => {
+      active = false;
       cancelAnimationFrame(rafId);
-    };
-    // Only run on mount-like conditions. audioUrl is here so we create the instance
-    // when the player first appears, but we guard against re-creation above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioUrl, setIsPlaying, setDuration, setCurrentTime]);
-
-  // Destroy WaveSurfer only on unmount
-  useEffect(() => {
-    return () => {
+      if (retryTimer !== null) clearTimeout(retryTimer);
       if (wavesurferRef.current) {
-        debug.log('Destroying WaveSurfer instance (unmount)');
+        debug.log('Destroying WaveSurfer instance');
+        try {
+          // WaveSurfer treats its WebAudio backend as external media, so
+          // destroy() alone leaves that audio source playing.
+          wavesurferRef.current.pause();
+        } catch (err) {
+          debug.error('Error stopping WaveSurfer:', err);
+        }
         try {
           wavesurferRef.current.destroy();
         } catch (err) {
           debug.error('Error destroying WaveSurfer:', err);
+        } finally {
+          // A decode already in flight can emit ready even after destroy().
+          wavesurferRef.current.unAll();
+        }
+        try {
+          disposeMedia?.();
+        } catch (err) {
+          debug.error('Error releasing waveform media:', err);
         }
         wavesurferRef.current = null;
-        setWsReady(false);
+        waveformSourceRef.current = '';
       }
+      loadingRef.current = false;
+      setWsReady(false);
+      setIsLoading(false);
+      setError(null);
     };
-  }, []);
+  }, [isPlayerVisible, setIsPlaying, setDuration, setCurrentTime]);
 
   // Load audio when URL changes (reuses the existing WaveSurfer instance)
   useEffect(() => {
@@ -321,14 +353,25 @@ export function AudioPlayer() {
     setDuration(0);
 
     const request = new AbortController();
+    audioLoadRef.current = request;
     let sourceUrl = '';
-    void loadAudioSource(audioUrl, request.signal)
+    // Only store-created local bytes may bypass the server/authentication path.
+    // Their URL is released by the store, including when this player is absent.
+    const isLocalSource = audioSourceKind === 'local';
+    const source = isLocalSource
+      ? Promise.resolve(audioUrl)
+      : loadAudioSource(audioUrl, request.signal);
+    void source
       .then((src) => {
         if (request.signal.aborted) {
-          releaseAudioSource(src);
+          if (!isLocalSource) releaseAudioSource(src);
           return;
         }
         sourceUrl = src;
+        waveformSourceRef.current = src;
+        // WaveSurfer mutates fetchParams with its own abort signal. Replace
+        // them for each track so a reused instance never inherits an aborted one.
+        wavesurfer.setOptions({ fetchParams: { credentials: 'omit', signal: request.signal } });
         return wavesurfer.load(src);
       })
       .then(() => {
@@ -345,9 +388,10 @@ export function AudioPlayer() {
       });
     return () => {
       request.abort();
-      releaseAudioSource(sourceUrl);
+      if (audioLoadRef.current === request) audioLoadRef.current = null;
+      if (!isLocalSource) releaseAudioSource(sourceUrl);
     };
-  }, [audioUrl, wsReady, setCurrentTime, setDuration]);
+  }, [audioUrl, audioSourceKind, wsReady, setCurrentTime, setDuration]);
 
   // Sync play/pause state (only when user clicks play/pause button, not auto-sync)
   // This effect is kept for external state changes but should be minimal
@@ -451,13 +495,19 @@ export function AudioPlayer() {
     if (useNativePlayback && audioUrl && profileChannels && channels) {
       if (isPlaying) {
         // Pause: stop native playback and pause WaveSurfer visualization
+        const wavesurfer = wavesurferRef.current;
+        const audioLoad = audioLoadRef.current;
         try {
           await platform.audio.stopPlayback();
           debug.log('Stopped native audio playback');
         } catch (error) {
           debug.error('Failed to stop native playback:', error);
         }
-        wavesurferRef.current.pause();
+        // The IPC may finish after close/reopen or a track change on the same
+        // instance. Only the playback that requested this pause may be changed.
+        if (wavesurferRef.current === wavesurfer && audioLoad && !audioLoad.signal.aborted) {
+          wavesurfer.pause();
+        }
         return;
       }
 

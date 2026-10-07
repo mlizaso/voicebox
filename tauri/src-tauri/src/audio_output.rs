@@ -403,13 +403,13 @@ impl AudioOutputState {
             device_sample_rate, device_channels, device_sample_format
         );
 
-        // Resample if needed (simple linear interpolation for now)
+        // Resample complete frames to keep interleaved channels aligned.
         let resampled = if device_sample_rate != sample_rate {
             eprintln!(
                 "play_to_device: Resampling from {}Hz to {}Hz",
                 sample_rate, device_sample_rate
             );
-            let result = Self::resample(&samples, sample_rate, device_sample_rate);
+            let result = Self::resample(&samples, sample_rate, device_sample_rate, channels);
             eprintln!(
                 "play_to_device: Resampled {} samples to {} samples",
                 samples.len(),
@@ -577,22 +577,19 @@ impl AudioOutputState {
         Ok(())
     }
 
-    fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    fn resample(samples: &[f32], from_rate: u32, to_rate: u32, channels: u16) -> Vec<f32> {
         if from_rate == to_rate {
             return samples.to_vec();
         }
 
         let ratio = to_rate as f64 / from_rate as f64;
-        let new_len = (samples.len() as f64 * ratio) as usize;
-        let mut resampled = Vec::with_capacity(new_len);
+        let channels = channels as usize;
+        let new_frames = ((samples.len() / channels) as f64 * ratio) as usize;
+        let mut resampled = Vec::with_capacity(new_frames * channels);
 
-        for i in 0..new_len {
-            let src_idx = (i as f64 / ratio) as usize;
-            if src_idx < samples.len() {
-                resampled.push(samples[src_idx]);
-            } else {
-                resampled.push(0.0);
-            }
+        for i in 0..new_frames {
+            let src_idx = (i as f64 / ratio) as usize * channels;
+            resampled.extend_from_slice(&samples[src_idx..src_idx + channels]);
         }
 
         resampled
@@ -635,6 +632,50 @@ impl Default for AudioOutputState {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn resampling_preserves_stereo_frames_at_integer_ratios() {
+        assert_eq!(
+            AudioOutputState::resample(&[1.0, 0.0, 1.0, 0.0], 24_000, 48_000, 2),
+            [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn resampling_preserves_stereo_frames_at_fractional_ratios() {
+        assert_eq!(
+            AudioOutputState::resample(&[1.0, 0.0, 2.0, -1.0, 3.0, -2.0], 24_000, 32_000, 2),
+            [1.0, 0.0, 1.0, 0.0, 2.0, -1.0, 3.0, -2.0]
+        );
+    }
+
+    #[test]
+    fn resampling_downsamples_complete_stereo_frames() {
+        assert_eq!(
+            AudioOutputState::resample(
+                &[1.0, 0.0, 2.0, -1.0, 3.0, -2.0, 4.0, -3.0],
+                48_000,
+                24_000,
+                2,
+            ),
+            [1.0, 0.0, 3.0, -2.0]
+        );
+    }
+
+    #[test]
+    fn resampling_preserves_mono_and_same_rate_audio() {
+        let mono = [1.0, -1.0, 0.5];
+        assert_eq!(
+            AudioOutputState::resample(&mono, 24_000, 48_000, 1),
+            [1.0, 1.0, -1.0, -1.0, 0.5, 0.5]
+        );
+        let stereo = [1.0, 0.0, 0.5, -0.5];
+        assert_eq!(
+            AudioOutputState::resample(&stereo, 24_000, 24_000, 2),
+            stereo
+        );
+        assert!(AudioOutputState::resample(&[], 24_000, 48_000, 2).is_empty());
+    }
 
     #[tokio::test]
     async fn cancelled_output_never_reports_readiness() {

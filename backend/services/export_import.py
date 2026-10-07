@@ -33,7 +33,13 @@ from ..database import (
     ProfileSample as DBProfileSample,
     VoiceProfile as DBVoiceProfile,
 )
-from ..models import GenerationRequest, ProfileSampleCreate, VoiceProfileCreate, VoiceProfileResponse
+from ..models import (
+    GenerationRequest,
+    ProfileEffectsUpdate,
+    ProfileSampleCreate,
+    VoiceProfileCreate,
+    VoiceProfileResponse,
+)
 from ..utils.audio import save_audio, validate_and_load_reference_audio
 from ..utils.audio_metadata import (
     PORTABLE_AUDIO_MAX_CHANNELS,
@@ -54,6 +60,7 @@ from .profiles import (
     EXACT_VOICE_SNAPSHOT_MAX_SAMPLE_BYTES,
     EXACT_VOICE_SNAPSHOT_MAX_TOTAL_REFERENCE_TEXT_BYTES,
     _profile_to_response,
+    _validate_profile_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -977,6 +984,7 @@ def _get_unique_profile_name(name: str, db: Session) -> str:
         Unique profile name
     """
     base_name = name
+    max_name_length = VoiceProfileCreate.model_json_schema()["properties"]["name"]["maxLength"]
     counter = 1
 
     while True:
@@ -984,7 +992,8 @@ def _get_unique_profile_name(name: str, db: Session) -> str:
         if not existing:
             return name
 
-        name = f"{base_name} ({counter})"
+        suffix = f" ({counter})"
+        name = f"{base_name[: max_name_length - len(suffix)]}{suffix}"
         counter += 1
 
 
@@ -1083,6 +1092,42 @@ def _archive_fingerprint(members: dict[str, zipfile.ZipInfo]) -> ArchiveFingerpr
     )
 
 
+def _validated_profile_archive_metadata(raw_profile_data: dict) -> dict:
+    """Apply the profile/effects API contracts before archive side effects."""
+    try:
+        validated_profile = VoiceProfileCreate.model_validate(
+            {**raw_profile_data, "name": raw_profile_data.get("name", "Imported Profile")}
+        )
+        profile_data = validated_profile.model_dump()
+        profile_data["voice_type"] = validated_profile.voice_type or "cloned"
+        if profile_data["voice_type"] == "preset" and not profile_data["default_engine"]:
+            profile_data["default_engine"] = validated_profile.preset_engine
+        validation_error = _validate_profile_fields(
+            voice_type=profile_data["voice_type"],
+            preset_engine=validated_profile.preset_engine,
+            preset_voice_id=validated_profile.preset_voice_id,
+            design_prompt=validated_profile.design_prompt,
+            default_engine=profile_data["default_engine"],
+        )
+        if validation_error:
+            raise ValueError(validation_error)
+
+        raw_effects = raw_profile_data.get("effects_chain")
+        if raw_effects is not None:
+            from ..utils.effects import validate_effects_chain
+
+            validation_error = validate_effects_chain(raw_effects)
+            if validation_error:
+                raise ValueError(validation_error)
+        validated_effects = ProfileEffectsUpdate(effects_chain=raw_effects).effects_chain
+        profile_data["effects_chain"] = (
+            [effect.model_dump() for effect in validated_effects] if validated_effects is not None else None
+        )
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("Invalid manifest.json: profile metadata is invalid") from exc
+    return profile_data
+
+
 def _inspect_profile_import(archive_source: ArchiveSource) -> _ProfileImportPlan:
     """Inspect and size a profile archive without creating persistent files."""
     with _open_zip_archive(archive_source) as archive:
@@ -1109,19 +1154,7 @@ def _inspect_profile_import(archive_source: ArchiveSource) -> _ProfileImportPlan
         raw_profile_data = manifest_data.get("profile")
         if not isinstance(raw_profile_data, dict):
             raise ValueError("Invalid manifest.json: missing profile")
-        original_name = raw_profile_data.get("name", "Imported Profile")
-        if not isinstance(original_name, str):
-            raise ValueError("Invalid manifest.json: profile.name must be a string")
-        validated_profile = VoiceProfileCreate(
-            name=original_name,
-            description=raw_profile_data.get("description"),
-            language=raw_profile_data.get("language", "en"),
-        )
-        profile_data = {
-            "name": validated_profile.name,
-            "description": validated_profile.description,
-            "language": validated_profile.language,
-        }
+        profile_data = _validated_profile_archive_metadata(raw_profile_data)
 
         samples_data = _read_json_object(
             archive,
@@ -1129,7 +1162,7 @@ def _inspect_profile_import(archive_source: ArchiveSource) -> _ProfileImportPlan
             label="samples.json",
         )
         ordered_samples = _ordered_import_samples(manifest_data, samples_data)
-        if not ordered_samples:
+        if not ordered_samples and profile_data["voice_type"] == "cloned":
             raise ValueError("Profile archive contains no voice samples")
         if len(ordered_samples) > PROFILE_ARCHIVE_MAX_SAMPLES:
             raise ValueError(f"Profile archive contains too many voice samples (max {PROFILE_ARCHIVE_MAX_SAMPLES})")
@@ -1444,7 +1477,7 @@ async def export_profile_to_zip(profile_id: str, db: Session) -> ArchiveExport:
         raise ValueError(f"Profile {profile_id} not found")
 
     samples = db.query(DBProfileSample).filter_by(profile_id=profile_id).order_by(DBProfileSample.ordinal.asc()).all()
-    if not samples:
+    if not samples and (profile.voice_type or "cloned") == "cloned":
         raise ValueError(f"Profile {profile_id} has no samples")
     if len(samples) > PROFILE_ARCHIVE_MAX_SAMPLES:
         raise ArchiveExportLimitError(
@@ -1490,12 +1523,24 @@ async def export_profile_to_zip(profile_id: str, db: Session) -> ArchiveExport:
         )
     file_members.extend(sample_members)
 
+    effects_chain = None
+    if profile.effects_chain is not None:
+        if len(profile.effects_chain.encode("utf-8")) > ARCHIVE_JSON_MAX_BYTES:
+            raise ArchiveExportLimitError("Profile effects metadata is too large to export")
+        effects_chain = json.loads(profile.effects_chain)
     manifest = {
         "version": "1.0",
         "profile": {
             "name": profile.name,
             "description": profile.description,
             "language": profile.language,
+            "personality": profile.personality,
+            "default_engine": profile.default_engine,
+            "effects_chain": effects_chain,
+            "voice_type": profile.voice_type or "cloned",
+            "preset_engine": profile.preset_engine,
+            "preset_voice_id": profile.preset_voice_id,
+            "design_prompt": profile.design_prompt,
         },
         "has_avatar": has_avatar,
         "sample_order": [filename for _sample, filename in sample_entries],
@@ -1580,11 +1625,7 @@ async def import_profile_from_zip(
 
             original_name = plan.profile_data["name"]
             unique_name = _get_unique_profile_name(original_name, db)
-            profile_create = VoiceProfileCreate(
-                name=unique_name,
-                description=plan.profile_data["description"],
-                language=plan.profile_data["language"],
-            )
+            profile_create = VoiceProfileCreate.model_validate({**plan.profile_data, "name": unique_name})
 
             profile_id = str(uuid.uuid4())
             profiles_dir = config.get_profiles_dir()
@@ -1595,10 +1636,12 @@ async def import_profile_from_zip(
             now = datetime.utcnow()
             db_profile = DBVoiceProfile(
                 id=profile_id,
-                name=profile_create.name,
-                description=profile_create.description,
-                language=profile_create.language,
-                voice_type="cloned",
+                **profile_create.model_dump(),
+                effects_chain=(
+                    json.dumps(plan.profile_data["effects_chain"])
+                    if plan.profile_data["effects_chain"] is not None
+                    else None
+                ),
                 created_at=now,
                 updated_at=now,
             )
@@ -1969,6 +2012,18 @@ async def import_generation_from_zip(
                     staging_destination,
                     expected_stat=pending_stat,
                 )
+                # The selected profile may have been deleted during the worker
+                # copy. Start a fresh transaction and acquire its writer lock
+                # before publishing: SQLite installations do not enforce FKs.
+                db.rollback()
+                db.expire_all()
+                profile_count = (
+                    db.query(DBVoiceProfile)
+                    .filter_by(id=profile_id)
+                    .update({DBVoiceProfile.updated_at: DBVoiceProfile.updated_at}, synchronize_session=False)
+                )
+                if profile_count != 1:
+                    raise ValueError(f"Profile {profile_id} not found")
                 deletion_journal.rename_managed_entry(staging_relative, audio_relative)
                 stored_audio_path = config.to_storage_path(audio_destination)
 

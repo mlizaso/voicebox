@@ -37,6 +37,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
+import { captureServerConnection } from '@/lib/api/connectionGuard';
 import type { EffectConfig, PresetVoice, VoiceType } from '@/lib/api/types';
 import { LANGUAGE_CODES, LANGUAGE_OPTIONS, type LanguageCode } from '@/lib/constants/languages';
 import { useAudioDuration } from '@/lib/hooks/useAudioDuration';
@@ -477,6 +478,9 @@ export function ProfileForm() {
   }
 
   async function onSubmit(data: ProfileFormValues) {
+    const connection = captureServerConnection(
+      'Connection changed. Save the voice again on the selected server.',
+    );
     try {
       if (editingProfileId) {
         // Editing: update profile
@@ -490,6 +494,7 @@ export function ProfileForm() {
             personality: data.personality?.trim() ? data.personality.trim() : undefined,
           },
         });
+        connection.assertCurrent();
 
         // Handle avatar upload/update if file changed
         if (data.avatarFile) {
@@ -498,7 +503,9 @@ export function ProfileForm() {
               profileId: editingProfileId,
               file: data.avatarFile,
             });
+            connection.assertCurrent();
           } catch (avatarError) {
+            connection.assertCurrent();
             toast({
               title: t('profileForm.toast.avatarUploadFailed'),
               description:
@@ -513,11 +520,14 @@ export function ProfileForm() {
         // Save effects chain if changed
         if (effectsDirty) {
           try {
+            connection.assertCurrent();
             await apiClient.updateProfileEffects(
               editingProfileId,
               profileEffectsChain.length > 0 ? profileEffectsChain : null,
             );
+            connection.assertCurrent();
           } catch (fxError) {
+            connection.assertCurrent();
             toast({
               title: t('profileForm.toast.effectsUpdateFailed'),
               description:
@@ -555,6 +565,7 @@ export function ProfileForm() {
           default_engine: selectedPresetEngine,
           personality: data.personality?.trim() ? data.personality.trim() : undefined,
         });
+        connection.assertCurrent();
 
         // Handle avatar upload if provided
         if (data.avatarFile) {
@@ -563,7 +574,9 @@ export function ProfileForm() {
               profileId: profile.id,
               file: data.avatarFile,
             });
+            connection.assertCurrent();
           } catch (avatarError) {
+            connection.assertCurrent();
             toast({
               title: t('profileForm.toast.avatarUploadFailed'),
               description:
@@ -612,6 +625,7 @@ export function ProfileForm() {
 
         try {
           const duration = await getAudioDuration(sampleFile);
+          connection.assertCurrent();
           if (duration > MAX_AUDIO_DURATION_SECONDS) {
             form.setError('sampleFile', {
               type: 'manual',
@@ -631,6 +645,7 @@ export function ProfileForm() {
             return;
           }
         } catch (error) {
+          connection.assertCurrent();
           form.setError('sampleFile', {
             type: 'manual',
             message: t('profileForm.validation.audioFailed'),
@@ -652,6 +667,7 @@ export function ProfileForm() {
           default_engine: defaultEngine || undefined,
           personality: data.personality?.trim() ? data.personality.trim() : undefined,
         });
+        connection.assertCurrent();
 
         // Convert non-WAV uploads to WAV so the backend can always use soundfile.
         // Recorded audio is already WAV (from useAudioRecording's convertToWav call).
@@ -665,6 +681,7 @@ export function ProfileForm() {
             // If browser can't decode the format, send the original and let the backend try.
           }
         }
+        connection.assertCurrent();
 
         try {
           await addSample.mutateAsync({
@@ -672,6 +689,7 @@ export function ProfileForm() {
             file: fileToUpload,
             referenceText: referenceText,
           });
+          connection.assertCurrent();
 
           // Handle avatar upload if provided
           if (data.avatarFile) {
@@ -680,7 +698,9 @@ export function ProfileForm() {
                 profileId: profile.id,
                 file: data.avatarFile,
               });
+              connection.assertCurrent();
             } catch (avatarError) {
+              connection.assertCurrent();
               toast({
                 title: 'Avatar upload failed',
                 description:
@@ -695,11 +715,15 @@ export function ProfileForm() {
             description: t('profileForm.toast.profileCreatedSample', { name: data.name }),
           });
         } catch (sampleError) {
+          // Never compensate an old server's profile on the current server.
+          connection.assertCurrent();
           let rollbackSucceeded = false;
           try {
             await deleteProfile.mutateAsync(profile.id);
+            connection.assertCurrent();
             rollbackSucceeded = true;
           } catch (rollbackError) {
+            connection.assertCurrent();
             toast({
               title: t('profileForm.toast.rollbackFailed'),
               description:
@@ -728,6 +752,7 @@ export function ProfileForm() {
       }
 
       // Clear draft and reset form on success
+      connection.assertCurrent();
       setProfileFormDraft(null);
       form.reset();
       setEditingProfileId(null);
@@ -1282,13 +1307,8 @@ export function ProfileForm() {
                 <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
                   {t('common.cancel')}
                 </Button>
-                <Button
-                  type="submit"
-                  disabled={
-                    createProfile.isPending || updateProfile.isPending || addSample.isPending
-                  }
-                >
-                  {createProfile.isPending || updateProfile.isPending || addSample.isPending
+                <Button type="submit" disabled={form.formState.isSubmitting}>
+                  {form.formState.isSubmitting
                     ? t('profileForm.actions.saving')
                     : editingProfileId
                       ? t('profileForm.actions.saveChanges')

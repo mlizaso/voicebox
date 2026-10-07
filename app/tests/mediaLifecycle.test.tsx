@@ -279,3 +279,96 @@ test('story playback streams only active clips and releases them on pause', asyn
   act(() => useStoryStore.getState().pause());
   expect(players.every((player) => player.src === '')).toBe(true);
 });
+
+test('leaving story playback invalidates its closed clock and explicitly resumes on the next mount', async () => {
+  useServerStore.setState({ serverUrl: 'http://127.0.0.1:17493', remoteApiToken: '' });
+  const players: FakeAudio[] = [];
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  let now = 50;
+  class FakeAudio {
+    src = '';
+    currentTime = 0;
+    onloadedmetadata: (() => void) | null = null;
+    onended: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    pause = mock(() => {});
+    play = mock(async () => {});
+    constructor() {
+      players.push(this);
+    }
+    removeAttribute() {
+      this.src = '';
+    }
+    load() {
+      if (this.src) this.onloadedmetadata?.();
+    }
+  }
+  const connection = () => ({ connect() {}, disconnect() {}, gain: { value: 1 } });
+  class FakeContext {
+    state = 'running';
+    sampleRate = 48000;
+    destination = {};
+    startedAt = now;
+    get currentTime() {
+      return now - this.startedAt;
+    }
+    createGain = connection;
+    createMediaElementSource = connection;
+    close = async () => {
+      this.state = 'closed';
+    };
+  }
+  Object.assign(globalThis, {
+    Audio: FakeAudio,
+    AudioContext: FakeContext,
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    },
+    cancelAnimationFrame: (id: number) => {
+      frames.delete(id);
+    },
+  });
+  const clips = [
+    { id: 'clip', generation_id: 'generation', duration: 10, start_time_ms: 0 },
+  ] as StoryItemDetail[];
+  function Playback() {
+    useStoryPlayback();
+    return null;
+  }
+  function tick() {
+    const callbacks = [...frames.values()];
+    frames.clear();
+    for (const callback of callbacks) callback(0);
+  }
+  act(() => {
+    renderer = create(<Playback />);
+  });
+  await act(async () => useStoryStore.getState().play('story', clips));
+  act(() => {
+    now += 2;
+    tick();
+  });
+  expect(useStoryStore.getState().currentTimeMs).toBe(2000);
+  act(() => {
+    renderer?.unmount();
+    renderer = undefined;
+  });
+  expect(useStoryStore.getState().isPlaying).toBe(false);
+  expect(useStoryStore.getState().playbackStartContextTime).toBeNull();
+  expect(useStoryStore.getState().playbackStartStoryTime).toBeNull();
+  expect(useStoryStore.getState().currentTimeMs).toBe(2000);
+  expect(players[0].src).toBe('');
+  act(() => {
+    renderer = create(<Playback />);
+  });
+  expect(players).toHaveLength(1);
+  await act(async () => useStoryStore.getState().play('story', clips));
+  expect(players[1].currentTime).toBe(2);
+  act(() => {
+    now += 1;
+    tick();
+  });
+  expect(useStoryStore.getState().currentTimeMs).toBe(3000);
+});

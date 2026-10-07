@@ -1,3 +1,4 @@
+import { MAX_BUFFERED_AUDIO_BYTES } from '@/lib/constants/audio';
 import { useServerStore } from '@/stores/serverStore';
 import {
   authenticatedFetch,
@@ -19,7 +20,7 @@ export async function loadAudioSource(url: string, signal: AbortSignal): Promise
   }
   const response = await authenticatedFetch(url, { signal });
   if (!response.ok) throw new Error(`Could not load audio (${response.status})`);
-  const bounded = await bufferResponseBounded(response, 32 * 1024 * 1024);
+  const bounded = await bufferResponseBounded(response, MAX_BUFFERED_AUDIO_BYTES);
   const blob = await bounded.blob();
   signal.throwIfAborted();
   return URL.createObjectURL(blob);

@@ -169,6 +169,8 @@ test('polling does not overlap requests or restart from a queued timer after unm
 });
 
 class FakeEventSource {
+  CLOSED = 2;
+  readyState = 0;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   close = mock(() => {});
@@ -254,6 +256,113 @@ test('current generation completion adds and autoplays exactly once', async () =
   expect(useGenerationStore.getState().pendingStoryAdds.size).toBe(0);
   expect(usePlayerStore.getState().audioId).toBe('generation');
   expect(usePlayerStore.getState().shouldAutoPlay).toBe(true);
+});
+
+test('a transient stream error retains the pending story add until terminal status reconnects', async () => {
+  const sources = await mountProgress();
+  const source = sources[0];
+  const addStory = spyOn(apiClient, 'addStoryItem').mockResolvedValue({} as StoryItemDetail);
+  await act(async () => source.onerror!());
+  expect(source.close).not.toHaveBeenCalled();
+  expect(useGenerationStore.getState().pendingGenerationIds.has('generation')).toBe(true);
+  expect(useGenerationStore.getState().pendingStoryAdds.get('generation')).toBe('old-story');
+  await act(async () =>
+    source.onmessage!({
+      data: JSON.stringify({ id: 'generation', status: 'completed', duration: 1 }),
+    }),
+  );
+  expect(addStory).toHaveBeenCalledTimes(1);
+  expect(usePlayerStore.getState().audioId).toBe('generation');
+  expect(useGenerationStore.getState().pendingGenerationIds.size).toBe(0);
+  expect(useGenerationStore.getState().pendingStoryAdds.size).toBe(0);
+});
+
+test('a terminal stream rejection clears tracking and its deferred story intent', async () => {
+  const sources = await mountProgress();
+  const source = sources[0];
+  source.readyState = source.CLOSED;
+  await act(async () => source.onerror!());
+  expect(source.close).toHaveBeenCalledTimes(1);
+  expect(useGenerationStore.getState().pendingGenerationIds.size).toBe(0);
+  expect(useGenerationStore.getState().pendingStoryAdds.size).toBe(0);
+  expect(usePlayerStore.getState().audioId).toBeNull();
+});
+
+test.each([
+  'disconnect',
+  '403 rejection',
+])('the real EventSource handles %s without an active-task poll', async (failure) => {
+  let attempts = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    attempts += 1;
+    if (failure === '403 rejection') return new Response('Forbidden', { status: 403 });
+    return new Response(
+      attempts === 1
+        ? 'retry: 1\n\n'
+        : 'data: {"id":"generation","status":"completed","duration":1}\n\n',
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as unknown as typeof fetch;
+  const addStory = spyOn(apiClient, 'addStoryItem').mockResolvedValue({} as StoryItemDetail);
+  spyOn(apiClient, 'getGenerationSettings').mockResolvedValue({
+    autoplay_on_generate: true,
+    crossfade_ms: 0,
+    max_chunk_chars: 100,
+    normalize_audio: false,
+  });
+  useGenerationStore.getState().addPendingGeneration('generation');
+  useGenerationStore.getState().addPendingStoryAdd('generation', 'story');
+  let complete!: () => void;
+  const completion = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  const unsubscribe = useGenerationStore.subscribe((state) => {
+    if (!state.pendingGenerationIds.has('generation')) complete();
+  });
+  function Progress() {
+    useGenerationProgress();
+    return null;
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    act(() => {
+      renderer = create(
+        <QueryClientProvider client={queryClient}>
+          <Progress />
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => {
+      await Promise.race([
+        completion,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Completion was lost after disconnect')),
+            1000,
+          );
+        }),
+      ]);
+    });
+    expect(attempts).toBe(failure === 'disconnect' ? 2 : 1);
+    if (failure === 'disconnect') {
+      expect(addStory).toHaveBeenCalledWith('story', { generation_id: 'generation' });
+      expect(usePlayerStore.getState().audioId).toBe('generation');
+    } else {
+      expect(addStory).not.toHaveBeenCalled();
+      expect(usePlayerStore.getState().audioId).toBeNull();
+    }
+    expect(useGenerationStore.getState().pendingGenerationIds.size).toBe(0);
+    expect(useGenerationStore.getState().pendingStoryAdds.size).toBe(0);
+  } finally {
+    unsubscribe();
+    clearTimeout(timeout);
+    act(() => {
+      renderer?.unmount();
+      renderer = undefined;
+    });
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test.each([

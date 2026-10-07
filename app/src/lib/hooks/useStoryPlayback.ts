@@ -103,10 +103,19 @@ export function useStoryPlayback() {
         masterGainRef.current.disconnect();
         masterGainRef.current = null;
       }
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close().catch(() => {
-          // Ignore errors when closing
+      if (audioContextRef.current) {
+        // This hook owns the clock. A later mount must wait for explicit play
+        // and establish fresh anchors, while retaining the last story position.
+        useStoryStore.setState({
+          isPlaying: false,
+          playbackStartContextTime: null,
+          playbackStartStoryTime: null,
         });
+        if (audioContextRef.current.state !== 'closed') {
+          audioContextRef.current.close().catch(() => {
+            // Ignore errors when closing
+          });
+        }
         audioContextRef.current = null;
       }
 

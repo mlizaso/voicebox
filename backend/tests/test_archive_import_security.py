@@ -14,13 +14,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend import config
 from backend.database import Base, Generation, ProfileSample, VoiceProfile
 from backend.routes import history as history_routes, profiles as profile_routes, transcription as transcription_routes
-from backend.services import captures, deletion_journal, export_import
+from backend.services import captures, deletion_journal, export_import, profiles
 from backend.utils.upload_limits import UploadDurationLimitError
 
 
@@ -92,7 +93,7 @@ def _wav_bytes(
     return output.getvalue()
 
 
-def _generation_archive(*, duration: float = 2.0, audio: bytes | None = None) -> bytes:
+def _generation_archive(*, duration: float = 2.0, audio: bytes | None = None, profile_name: str = "Narrator") -> bytes:
     manifest = {
         "version": "1.0",
         "generation": {
@@ -100,7 +101,7 @@ def _generation_archive(*, duration: float = 2.0, audio: bytes | None = None) ->
             "language": "en",
             "duration": duration,
         },
-        "profile": {"name": "Narrator"},
+        "profile": {"name": profile_name},
     }
     return _zip_bytes(
         [
@@ -309,6 +310,75 @@ async def test_generation_import_cancellation_drains_journaled_publication(
     assert not list(config.get_deletion_journal_dir().glob("*.json"))
     assert not list((storage_root / "generations").glob("*.wav"))
     assert db.query(Generation).count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile_name", ["Narrator", "Unmatched narrator"])
+async def test_generation_import_rejects_profile_deleted_during_population(db, storage_root, monkeypatch, profile_name):
+    db.add(VoiceProfile(id="profile", name="Narrator", voice_type="cloned"))
+    db.commit()
+    assert db.execute(text("PRAGMA foreign_keys")).scalar_one() == 0
+    started = threading.Event()
+    release = threading.Event()
+    real_populate = export_import._populate_private_file
+
+    def held_populate(source, destination, *, expected_stat):
+        started.set()
+        assert release.wait(timeout=5)
+        real_populate(source, destination, expected_stat=expected_stat)
+
+    monkeypatch.setattr(export_import, "_populate_private_file", held_populate)
+    task = asyncio.create_task(
+        export_import.import_generation_from_zip(_generation_archive(profile_name=profile_name), db)
+    )
+    try:
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=2)
+        with Session(bind=db.get_bind()) as concurrent:
+            assert await profiles.delete_profile("profile", concurrent)
+        release.set()
+        with pytest.raises(ValueError, match="Profile profile not found"):
+            await asyncio.wait_for(task, timeout=3)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    with Session(bind=db.get_bind()) as fresh:
+        assert fresh.query(VoiceProfile).count() == 0
+        assert fresh.query(Generation).count() == 0
+    assert list((storage_root / "generations").iterdir()) == []
+    assert not list(config.get_deletion_journal_dir().glob("*.json"))
+    assert export_import._active_archive_import_directories == {}
+
+    db.add(VoiceProfile(id="replacement", name="Narrator", voice_type="cloned"))
+    db.commit()
+    result = await export_import.import_generation_from_zip(_generation_archive(), db)
+    assert result["profile_id"] == "replacement"
+    assert db.query(Generation).one().profile_id == "replacement"
+
+
+@pytest.mark.asyncio
+async def test_generation_import_holds_profile_writer_lock_until_commit(db, storage_root, monkeypatch):
+    db.add(VoiceProfile(id="profile", name="Narrator", voice_type="cloned"))
+    db.commit()
+    updated_at = db.query(VoiceProfile).one().updated_at
+    real_rename = deletion_journal.rename_managed_entry
+    attempted_delete = False
+
+    def delete_at_publication(staged, original):
+        nonlocal attempted_delete
+        with Session(bind=db.get_bind()) as concurrent:
+            concurrent.execute(text("PRAGMA busy_timeout = 0"))
+            with pytest.raises(OperationalError, match="database is locked"):
+                concurrent.query(VoiceProfile).filter_by(id="profile").delete()
+            concurrent.rollback()
+        attempted_delete = True
+        real_rename(staged, original)
+
+    monkeypatch.setattr(deletion_journal, "rename_managed_entry", delete_at_publication)
+    result = await export_import.import_generation_from_zip(_generation_archive(), db)
+    assert attempted_delete
+    assert db.query(Generation).one().profile_id == result["profile_id"] == "profile"
+    assert db.query(VoiceProfile).one().updated_at == updated_at
 
 
 @pytest.mark.asyncio

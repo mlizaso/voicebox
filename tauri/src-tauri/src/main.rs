@@ -746,8 +746,38 @@ async fn start_server(
     Ok(server_url)
 }
 
+#[cfg(any(windows, test))]
+async fn request_server_shutdown(url: &str) -> Result<(), reqwest::Error> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
+        .build()?;
+    client.post(url).send().await?.error_for_status()?;
+    Ok(())
+}
+
 #[command]
 async fn stop_server(state: State<'_, ServerState>) -> Result<(), String> {
+    #[cfg(windows)]
+    let _stop = state.start_lock.lock().await;
+
+    #[cfg(windows)]
+    {
+        let pid = *state.server_pid.lock().unwrap();
+        if let Some(pid) = pid {
+            println!("Sending graceful shutdown via HTTP for PID {pid}...");
+            let result =
+                request_server_shutdown(&format!("http://127.0.0.1:{SERVER_PORT}/shutdown")).await;
+            if let Err(error) = result {
+                // The process may exit before returning its final HTTP response.
+                // Otherwise retain the child, PID and monitor so stopping can be retried.
+                if *state.server_pid.lock().unwrap() == Some(pid) {
+                    return Err(format!("Failed to request server shutdown: {error}"));
+                }
+            }
+        }
+    }
+
     if let Some(monitor) = state.speak_monitor.lock().unwrap().take() {
         monitor.abort();
     }
@@ -774,23 +804,6 @@ async fn stop_server(state: State<'_, ServerState>) -> Result<(), String> {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
 
             println!("stop_server: Process group kill completed");
-        }
-
-        #[cfg(windows)]
-        {
-            // Send graceful shutdown via HTTP — the server's parent-pid watchdog
-            // will also handle cleanup if this app process exits.
-            println!("Sending graceful shutdown via HTTP...");
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-                .unwrap();
-
-            let _ = client
-                .post(&format!("http://127.0.0.1:{}/shutdown", SERVER_PORT))
-                .send();
-
-            println!("Shutdown request sent (server watchdog will handle cleanup)");
         }
     }
 
@@ -1535,7 +1548,70 @@ fn main() {
 
 #[cfg(test)]
 mod security_tests {
-    use super::{local_directory_request, trusted_webview_origin};
+    use super::{local_directory_request, request_server_shutdown, trusted_webview_origin};
+
+    async fn shutdown_endpoint(
+        response: &'static [u8],
+    ) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let byte = socket.read_u8().await.unwrap();
+                request.push(byte);
+            }
+            socket.write_all(response).await.unwrap();
+            request
+        });
+        (format!("http://{address}/shutdown"), server)
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_uses_async_http_on_the_runtime() {
+        let (url, server) =
+            shutdown_endpoint(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        request_server_shutdown(&url).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with(b"POST /shutdown HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_does_not_report_http_errors_as_success() {
+        let (url, server) = shutdown_endpoint(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let error = request_server_shutdown(&url).await.unwrap_err();
+        assert_eq!(
+            error.status(),
+            Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_times_out_when_the_listener_stalls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = released.await;
+            drop(socket);
+        });
+
+        let error = request_server_shutdown(&format!("http://{address}/shutdown"))
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout());
+        release.send(()).unwrap();
+        server.await.unwrap();
+    }
 
     #[test]
     fn directory_open_rejects_remote_and_network_paths_before_filesystem_access() {

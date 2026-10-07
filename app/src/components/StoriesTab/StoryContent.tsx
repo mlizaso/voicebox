@@ -24,6 +24,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
+import { captureServerConnection } from '@/lib/api/connectionGuard';
 import { useHistory } from '@/lib/hooks/useHistory';
 import {
   useAddStoryItem,
@@ -230,30 +231,42 @@ export function StoryContent() {
     );
   };
 
-  const handleImportAudio = async (file: File) => {
+  const handleImportAudio = async (
+    file: File,
+    connection: ReturnType<typeof captureServerConnection>,
+  ) => {
     if (!story) return;
-    setIsImporting(true);
-    try {
-      const generation = await apiClient.importAudio(file);
-      await addStoryItem.mutateAsync({
-        storyId: story.id,
-        data: { generation_id: generation.id },
-      });
-      setIsAddOpen(false);
-    } catch (error) {
-      toast({
-        title: t('storyContent.toast.importFailed'),
-        description: error instanceof Error ? error.message : String(error),
-        variant: 'destructive',
-      });
-    } finally {
-      setIsImporting(false);
-    }
+    connection.assertCurrent();
+    const generation = await apiClient.importAudio(file);
+    connection.assertCurrent();
+    await addStoryItem.mutateAsync({
+      storyId: story.id,
+      data: { generation_id: generation.id },
+    });
+    connection.assertCurrent();
+    setIsAddOpen(false);
   };
 
   const handleImportFiles = async (files: FileList | File[]) => {
-    for (const file of Array.from(files)) {
-      await handleImportAudio(file);
+    const connection = captureServerConnection(
+      'Connection changed. Import the files again on the selected server.',
+    );
+    setIsImporting(true);
+    try {
+      for (const file of Array.from(files)) {
+        try {
+          await handleImportAudio(file, connection);
+        } catch (error) {
+          toast({
+            title: t('storyContent.toast.importFailed'),
+            description: error instanceof Error ? error.message : String(error),
+            variant: 'destructive',
+          });
+          if (!connection.isCurrent()) break;
+        }
+      }
+    } finally {
+      setIsImporting(false);
     }
   };
 

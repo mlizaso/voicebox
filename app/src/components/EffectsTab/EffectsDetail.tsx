@@ -20,6 +20,7 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
+import { captureServerConnection } from '@/lib/api/connectionGuard';
 import type { HistoryResponse } from '@/lib/api/types';
 import { useHistory } from '@/lib/hooks/useHistory';
 import { useEffectsStore } from '@/stores/effectsStore';
@@ -47,8 +48,9 @@ export function EffectsDetail() {
   // Preview state
   const [previewGenId, setPreviewGenId] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const blobUrlRef = useRef<string | null>(null);
-  const setAudioWithAutoPlay = usePlayerStore((s) => s.setAudioWithAutoPlay);
+  const previewRequestRef = useRef(0);
+  const mountedRef = useRef(false);
+  const setLocalAudioWithAutoPlay = usePlayerStore((s) => s.setLocalAudioWithAutoPlay);
 
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -85,13 +87,13 @@ export function EffectsDetail() {
     }
   }, [preset, isCreatingNew]);
 
-  // Cleanup blob URL on unmount
+  // Preview bytes may arrive after this panel disappears. The player store
+  // owns accepted preview URLs so switching panels can keep playing them.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
+      mountedRef.current = false;
+      previewRequestRef.current += 1;
     };
   }, []);
 
@@ -113,28 +115,28 @@ export function EffectsDetail() {
   async function handlePreview() {
     if (!previewGenId || workingChain.length === 0) return;
 
+    const requestId = ++previewRequestRef.current;
+    const isCurrent = () => mountedRef.current && previewRequestRef.current === requestId;
+    const connection = captureServerConnection(
+      'Connection changed. Preview the effects again on the selected server.',
+    );
     setPreviewLoading(true);
     try {
       const blob = await apiClient.previewEffects(previewGenId, workingChain);
-
-      // Revoke old blob URL
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-      }
-
-      const url = URL.createObjectURL(blob);
-      blobUrlRef.current = url;
+      if (!isCurrent()) return;
+      connection.assertCurrent();
 
       // Play through the main audio player
-      setAudioWithAutoPlay(url, `preview-${Date.now()}`, null, 'Effects Preview');
+      setLocalAudioWithAutoPlay(blob, `preview-${Date.now()}`, 'Effects Preview');
     } catch (error) {
+      if (!isCurrent()) return;
       toast({
         title: t('effects.toast.previewFailed'),
         description: error instanceof Error ? error.message : t('common.unknownError'),
         variant: 'destructive',
       });
     } finally {
-      setPreviewLoading(false);
+      if (isCurrent()) setPreviewLoading(false);
     }
   }
 

@@ -1,6 +1,8 @@
+import { MAX_BUFFERED_AUDIO_BYTES } from '@/lib/constants/audio';
 import type { LanguageCode } from '@/lib/constants/languages';
 import { useServerStore } from '@/stores/serverStore';
 import { authenticatedFetch } from './authenticatedFetch';
+import { bufferResponseBounded } from './boundedResponse';
 import { assertApiResponse } from './responseError';
 import type {
   ActiveTasksResponse,
@@ -855,7 +857,8 @@ class ApiClient {
 
     await assertApiResponse(response);
 
-    return response.blob();
+    const bounded = await bufferResponseBounded(response, MAX_BUFFERED_AUDIO_BYTES);
+    return bounded.blob();
   }
 
   // Cloud (backup & sync) — browser-based device login. startCloudLogin opens

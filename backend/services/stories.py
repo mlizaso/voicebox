@@ -149,6 +149,19 @@ def _story_item_count(story_id: str, db: Session) -> int:
     return db.query(func.count(DBStoryItem.id)).filter_by(story_id=story_id).scalar() or 0
 
 
+def _trimmed_duration_ms(item: DBStoryItem, generation: DBGeneration) -> int | None:
+    """Convert stored audio duration to the clip's occupied timeline length."""
+    try:
+        duration_ms = int(float(generation.duration) * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    trims = (item.trim_start_ms, item.trim_end_ms)
+    if any(type(trim) is not int or not 0 <= trim <= STORY_MAX_CLIP_MS for trim in trims):
+        return None
+    effective_duration_ms = duration_ms - sum(trims)
+    return effective_duration_ms if effective_duration_ms > 0 else None
+
+
 def _generation_is_usable_story_audio(generation: DBGeneration) -> bool:
     """Return whether a generation can be represented and rendered as a Story clip."""
     if generation.status != "completed":
@@ -656,11 +669,8 @@ async def add_item_to_story(
         else:
             max_end_time_ms = 0
             for item, gen in existing_items:
-                try:
-                    duration_ms = int(float(gen.duration) * 1000)
-                except (TypeError, ValueError, OverflowError):
-                    return None
-                if not _valid_timecode(item.start_time_ms) or duration_ms < 0:
+                duration_ms = _trimmed_duration_ms(item, gen)
+                if not _valid_timecode(item.start_time_ms) or duration_ms is None:
                     return None
                 item_end_ms = item.start_time_ms + duration_ms
                 max_end_time_ms = max(max_end_time_ms, item_end_ms)
@@ -938,11 +948,10 @@ async def split_story_item(
     # Calculate effective duration and validate split point
     current_trim_start = getattr(item, "trim_start_ms", 0)
     current_trim_end = getattr(item, "trim_end_ms", 0)
-    try:
-        original_duration_ms = int(float(generation.duration) * 1000)
-    except (TypeError, ValueError, OverflowError):
+    effective_duration_ms = _trimmed_duration_ms(item, generation)
+    if effective_duration_ms is None:
         return None
-    effective_duration_ms = original_duration_ms - current_trim_start - current_trim_end
+    original_duration_ms = effective_duration_ms + current_trim_start + current_trim_end
 
     # Validate split_time_ms is within the effective duration
     if (
@@ -1058,17 +1067,11 @@ async def duplicate_story_item(
     # Calculate effective duration
     current_trim_start = getattr(original_item, "trim_start_ms", 0)
     current_trim_end = getattr(original_item, "trim_end_ms", 0)
-    try:
-        original_duration_ms = int(float(generation.duration) * 1000)
-    except (TypeError, ValueError, OverflowError):
+    effective_duration_ms = _trimmed_duration_ms(original_item, generation)
+    if effective_duration_ms is None:
         return None
-    effective_duration_ms = original_duration_ms - current_trim_start - current_trim_end
     new_start_time_ms = original_item.start_time_ms + effective_duration_ms + 200
-    if (
-        effective_duration_ms <= 0
-        or not _valid_timecode(original_item.start_time_ms)
-        or not _valid_timecode(new_start_time_ms)
-    ):
+    if not _valid_timecode(original_item.start_time_ms) or not _valid_timecode(new_start_time_ms):
         return None
 
     # Create duplicate item - place it right after the original
@@ -1214,12 +1217,8 @@ async def reorder_story_items(
     positions: list[tuple[str, int]] = []
     for item_id in item_ids:
         item, generation, _profile_name = item_map[item_id]
-        try:
-            duration_ms = int(float(generation.duration) * 1000)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        duration_ms -= item.trim_start_ms + item.trim_end_ms
-        if duration_ms <= 0 or duration_ms > STORY_MAX_CLIP_MS:
+        duration_ms = _trimmed_duration_ms(item, generation)
+        if duration_ms is None or duration_ms > STORY_MAX_CLIP_MS:
             return None
         if current_time_ms + duration_ms > STORY_MAX_TIMELINE_MS:
             return None

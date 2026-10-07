@@ -149,6 +149,50 @@ def test_reorder_preserves_duplicate_generation_clips_and_uses_trimmed_durations
 
 
 @pytest.mark.parametrize(
+    ("trim_start_ms", "trim_end_ms", "split_at_ms", "expected_start_ms"),
+    [(0, 0, None, 10_200), (1_000, 5_000, None, 4_200), (0, 0, 4_000, 10_200), (1_000, 5_000, 2_000, 4_200)],
+)
+def test_add_item_uses_trimmed_end_on_its_track(
+    database, trim_start_ms, trim_end_ms, split_at_ms, expected_start_ms
+) -> None:
+    db, factory = database
+    _seed_story(db)
+    _add_item(db, "first", trim_start_ms=trim_start_ms, trim_end_ms=trim_end_ms)
+    if split_at_ms is not None:
+        split = asyncio.run(
+            stories.split_story_item("story", "first", models.StoryItemSplit(split_time_ms=split_at_ms), db)
+        )
+        assert split is not None
+    _add_item(db, "other-track", start_time_ms=50_000)
+    db.query(StoryItem).filter_by(id="other-track").one().track = 1
+    db.add(
+        Generation(
+            id="next-generation",
+            profile_id="profile",
+            text="Next narration",
+            language="en",
+            audio_path="generations/next.wav",
+            duration=2.0,
+            status="completed",
+        )
+    )
+    (stories.config.get_data_dir() / "generations" / "next.wav").write_bytes(b"audio")
+    db.commit()
+
+    result = asyncio.run(
+        stories.add_item_to_story("story", models.StoryItemCreate(generation_id="next-generation"), db)
+    )
+
+    assert result is not None
+    assert result.start_time_ms == expected_start_ms
+    with factory() as reader:
+        added = reader.query(StoryItem).filter_by(id=result.id).one()
+        assert added.start_time_ms == expected_start_ms
+        assert added.track == 0
+        assert reader.query(StoryItem).filter_by(id="other-track").one().start_time_ms == 50_000
+
+
+@pytest.mark.parametrize(
     ("status", "audio_path", "duration"),
     [
         ("generating", "generations/generation.wav", 10.0),
